@@ -1,9 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
-  cacheComponents: true,
-  partialPrefetching: true,
+  // Phase 1: always-fresh operational UI over local DB.
+  // Cache Components can be adopted later once read models are stable.
   turbopack: {
     rules: {
       "*.css": {

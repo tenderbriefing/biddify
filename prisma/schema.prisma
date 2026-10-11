@@ -1,0 +1,525 @@
+// Biddify domain model — Phase 1 foundation
+// Local/dev: SQLite (zero infra cost). Production target: PostgreSQL.
+// Switch provider + DATABASE_URL when deploying; review migrations first.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  FOUNDER
+  ADMIN
+  BID_MANAGER
+  REVIEWER
+  READ_ONLY
+}
+
+enum PipelineStatus {
+  NEW
+  REVIEW
+  QUALIFIED
+  SOURCING
+  AWAITING_SUPPLIERS
+  PRICING
+  COMPLIANCE
+  FOUNDER_REVIEW
+  APPROVED
+  SUBMISSION_AUTHORISED
+  SUBMITTED
+  AWARDED
+  LOST
+  NO_BID
+  CANCELLED
+  FULFILMENT
+  PAID
+}
+
+enum ProfitabilityGate {
+  GREEN
+  AMBER
+  RED
+  UNREVIEWED
+}
+
+enum ComplianceItemState {
+  NOT_REQUIRED
+  MISSING
+  AVAILABLE
+  EXPIRED
+  NEEDS_SIGNATURE
+  COMPLETED
+  VERIFIED
+}
+
+enum SubmissionMethod {
+  EMAIL
+  PORTAL
+  ETENDER
+  PHYSICAL
+  OTHER
+  UNKNOWN
+}
+
+enum AuditAction {
+  RFQ_IMPORTED
+  RFQ_STATUS_CHANGED
+  COMPANY_SELECTED
+  SUPPLIER_CONTACTED
+  QUOTE_RECEIVED
+  PRICE_CHANGED
+  DOCUMENT_UPLOADED
+  COMPLIANCE_VERIFIED
+  FOUNDER_APPROVED
+  FOUNDER_REJECTED
+  APPROVAL_INVALIDATED
+  BID_SUBMITTED
+  AWARD_RECORDED
+  USER_LOGIN
+  USER_LOGOUT
+  SEED_LOADED
+  NOTE_ADDED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         Role     @default(READ_ONLY)
+  isActive     Boolean  @default(true)
+  isDemo       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  approvals     Approval[]      @relation("ApprovalApprover")
+  auditEvents   AuditEvent[]
+  statusChanges RfqStatusEvent[]
+}
+
+model Company {
+  id                 String   @id @default(cuid())
+  legalName          String
+  tradingName        String?
+  registrationNumber String?
+  csdNumber          String?
+  taxNumber          String?
+  vatRegistered      Boolean  @default(false)
+  vatNumber          String?
+  beeLevel           String?
+  beeExpiry          DateTime?
+  bankName           String?
+  bankAccountName    String?
+  bankAccountNumber  String?
+  bankBranchCode     String?
+  physicalAddress    String?
+  postalAddress      String?
+  province           String?
+  contactName        String?
+  contactEmail       String?
+  contactPhone       String?
+  commodityNotes     String?
+  geographicCoverage String?
+  restrictions       String?
+  notes              String?
+  isDemo             Boolean  @default(false)
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  documents CompanyDocument[]
+  rfqs      Rfq[]
+  bids      Bid[]
+}
+
+model CompanyDocument {
+  id               String               @id @default(cuid())
+  companyId        String
+  documentType     String
+  title            String
+  issueDate        DateTime?
+  expiryDate       DateTime?
+  version          String?
+  verificationState ComplianceItemState @default(AVAILABLE)
+  storageKey       String?
+  notes            String?
+  isDemo           Boolean              @default(false)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+}
+
+model Supplier {
+  id                  String   @id @default(cuid())
+  name                String
+  website             String?
+  email               String?
+  telephone           String?
+  categories          String?
+  brands              String?
+  geographicCoverage  String?
+  paymentTerms        String?
+  deliveryCapability  String?
+  reliabilityNotes    String?
+  responseSpeedNotes  String?
+  notes               String?
+  isDemo              Boolean  @default(false)
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  contacts SupplierContact[]
+  quotes   SupplierQuote[]
+}
+
+model SupplierContact {
+  id         String   @id @default(cuid())
+  supplierId String
+  name       String
+  email      String?
+  telephone  String?
+  role       String?
+  isPrimary  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  @@index([supplierId])
+}
+
+model Rfq {
+  id                    String             @id @default(cuid())
+  internalId            String             @unique
+  source                String
+  sourceReference       String?
+  tenderNumber          String?
+  buyer                 String
+  department            String?
+  title                 String
+  description           String?
+  category              String?
+  province              String?
+  municipality          String?
+  deliveryAddress       String?
+  publicationDate       DateTime?
+  briefingDate          DateTime?
+  briefingCompulsory    Boolean            @default(false)
+  questionsDeadline     DateTime?
+  closingAt             DateTime
+  timezone              String             @default("Africa/Johannesburg")
+  submissionMethod      SubmissionMethod   @default(UNKNOWN)
+  submissionEmail       String?
+  submissionPortal      String?
+  physicalSubmission    String?
+  estimatedValue        Decimal?
+  contractDuration      String?
+  deliveryPeriod        String?
+  paymentTerms          String?
+  sourceUrl             String?
+  status                PipelineStatus     @default(NEW)
+  opportunityScore      Int?
+  commercialScore       Int?
+  complianceScore       Int?
+  profitabilityGate     ProfitabilityGate  @default(UNREVIEWED)
+  opportunityScoreNotes String?
+  noBidReason           String?
+  selectedCompanyId     String?
+  duplicateOfId         String?
+  isDemo                Boolean            @default(false)
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  selectedCompany Company?          @relation(fields: [selectedCompanyId], references: [id])
+  duplicateOf     Rfq?              @relation("RfqDuplicates", fields: [duplicateOfId], references: [id])
+  duplicates      Rfq[]             @relation("RfqDuplicates")
+  lineItems       RfqLineItem[]
+  requirements    RfqRequirement[]
+  documents       RfqDocument[]
+  quotes          SupplierQuote[]
+  pricingScenarios PricingScenario[]
+  complianceItems ComplianceRequirement[]
+  bids            Bid[]
+  statusEvents    RfqStatusEvent[]
+
+  @@index([status])
+  @@index([closingAt])
+  @@index([selectedCompanyId])
+}
+
+model RfqLineItem {
+  id                 String   @id @default(cuid())
+  rfqId              String
+  lineNumber         Int
+  product            String?
+  description        String
+  specification      String?
+  brandRequirement   String?
+  equivalentAllowed  Boolean  @default(true)
+  quantity           Decimal
+  unit               String   @default("EA")
+  deliveryDestination String?
+  notes              String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  rfq               Rfq                  @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  quoteLineItems    SupplierQuoteLineItem[]
+  pricingLineItems  PricingLineItem[]
+
+  @@index([rfqId])
+}
+
+model RfqRequirement {
+  id          String   @id @default(cuid())
+  rfqId       String
+  category    String
+  description String
+  isMandatory Boolean  @default(true)
+  sourceHint  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  rfq Rfq @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+
+  @@index([rfqId])
+}
+
+model RfqDocument {
+  id           String   @id @default(cuid())
+  rfqId        String
+  fileName     String
+  documentType String?
+  storageKey   String?
+  pageCount    Int?
+  extractedAt  DateTime?
+  isSource     Boolean  @default(true)
+  notes        String?
+  isDemo       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  rfq Rfq @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+
+  @@index([rfqId])
+}
+
+model SupplierQuote {
+  id              String   @id @default(cuid())
+  rfqId           String
+  supplierId      String
+  quoteReference  String?
+  receivedAt      DateTime @default(now())
+  validUntil      DateTime?
+  currency        String   @default("ZAR")
+  deliveryCost    Decimal  @default(0)
+  leadTimeDays    Int?
+  paymentTerms    String?
+  vatIncluded     Boolean?
+  notes           String?
+  isComplete      Boolean  @default(false)
+  isDemo          Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  rfq       Rfq                    @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  supplier  Supplier               @relation(fields: [supplierId], references: [id])
+  lineItems SupplierQuoteLineItem[]
+
+  @@index([rfqId])
+  @@index([supplierId])
+}
+
+model SupplierQuoteLineItem {
+  id              String   @id @default(cuid())
+  supplierQuoteId String
+  rfqLineItemId   String?
+  description     String
+  quantity        Decimal
+  unitCost        Decimal
+  lineTotal       Decimal
+  brandOffered    String?
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  supplierQuote SupplierQuote @relation(fields: [supplierQuoteId], references: [id], onDelete: Cascade)
+  rfqLineItem   RfqLineItem?  @relation(fields: [rfqLineItemId], references: [id])
+
+  @@index([supplierQuoteId])
+}
+
+model PricingScenario {
+  id                String             @id @default(cuid())
+  rfqId             String
+  name              String             @default("Primary")
+  markupPercent     Decimal            @default(20)
+  supplierCostTotal Decimal            @default(0)
+  deliveryCost      Decimal            @default(0)
+  logisticsCost     Decimal            @default(0)
+  packagingCost     Decimal            @default(0)
+  insuranceCost     Decimal            @default(0)
+  financingCost     Decimal            @default(0)
+  contingencyCost   Decimal            @default(0)
+  otherDirectCosts  Decimal            @default(0)
+  landedCost        Decimal            @default(0)
+  sellingPriceExVat Decimal            @default(0)
+  vatAmount         Decimal            @default(0)
+  totalQuotation    Decimal            @default(0)
+  grossProfit       Decimal            @default(0)
+  grossMarginPercent Decimal           @default(0)
+  workingCapitalRequired Decimal       @default(0)
+  profitabilityGate ProfitabilityGate  @default(UNREVIEWED)
+  vatRegisteredSnapshot Boolean?
+  notes             String?
+  isSelected        Boolean            @default(false)
+  isDemo            Boolean            @default(false)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  rfq       Rfq               @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  lineItems PricingLineItem[]
+  approvals Approval[]
+
+  @@index([rfqId])
+}
+
+model PricingLineItem {
+  id                String   @id @default(cuid())
+  pricingScenarioId String
+  rfqLineItemId     String?
+  description       String
+  quantity          Decimal
+  unitCost          Decimal
+  lineCost          Decimal
+  unitSell          Decimal
+  lineSell          Decimal
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  pricingScenario PricingScenario @relation(fields: [pricingScenarioId], references: [id], onDelete: Cascade)
+  rfqLineItem     RfqLineItem?    @relation(fields: [rfqLineItemId], references: [id])
+
+  @@index([pricingScenarioId])
+}
+
+model ComplianceRequirement {
+  id          String               @id @default(cuid())
+  rfqId       String
+  itemKey     String
+  label       String
+  isMandatory Boolean              @default(true)
+  state       ComplianceItemState  @default(MISSING)
+  notes       String?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  rfq Rfq @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+
+  @@index([rfqId])
+}
+
+model Bid {
+  id                    String           @id @default(cuid())
+  rfqId                 String
+  companyId             String
+  status                PipelineStatus   @default(PRICING)
+  approvedPrice         Decimal?
+  submissionMethod      SubmissionMethod @default(UNKNOWN)
+  founderApprovedAt     DateTime?
+  submissionAuthorisedAt DateTime?
+  submittedAt           DateTime?
+  isDemo                Boolean          @default(false)
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  rfq       Rfq        @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  company   Company    @relation(fields: [companyId], references: [id])
+  approvals Approval[]
+
+  @@index([rfqId])
+  @@index([companyId])
+}
+
+model Approval {
+  id                    String   @id @default(cuid())
+  bidId                 String?
+  pricingScenarioId     String?
+  approverId            String
+  approvedAt            DateTime @default(now())
+  approvedPrice         Decimal
+  approvedCompanyId     String?
+  approvedSupplierConfig String?
+  approvedSubmissionMethod SubmissionMethod @default(UNKNOWN)
+  comments              String?
+  isValid               Boolean  @default(true)
+  invalidatedAt         DateTime?
+  invalidationReason    String?
+  isDemo                Boolean  @default(false)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  bid             Bid?             @relation(fields: [bidId], references: [id])
+  pricingScenario PricingScenario? @relation(fields: [pricingScenarioId], references: [id])
+  approver        User             @relation("ApprovalApprover", fields: [approverId], references: [id])
+
+  @@index([bidId])
+  @@index([approverId])
+}
+
+model RfqStatusEvent {
+  id         String          @id @default(cuid())
+  rfqId      String
+  fromStatus PipelineStatus?
+  toStatus   PipelineStatus
+  userId     String?
+  reason     String?
+  createdAt  DateTime        @default(now())
+
+  rfq  Rfq   @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([rfqId])
+}
+
+model AuditEvent {
+  id           String      @id @default(cuid())
+  action       AuditAction
+  entityType   String
+  entityId     String?
+  userId       String?
+  previousState String?
+  newState     String?
+  metadata     String?
+  createdAt    DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model EmailMessage {
+  id             String   @id @default(cuid())
+  companyId      String?
+  rfqId          String?
+  sender         String
+  recipient      String
+  subject        String
+  body           String
+  deliveryState  String   @default("MOCK_HELD")
+  workflow       String?
+  isMock         Boolean  @default(true)
+  sentAt         DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([rfqId])
+}

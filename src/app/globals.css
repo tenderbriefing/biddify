@@ -1,26 +1,218 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #f4f5f7;
+  --bg-elevated: #ffffff;
+  --bg-sidebar: #0f1c2e;
+  --bg-sidebar-hover: #1a2d45;
+  --fg: #152033;
+  --fg-muted: #5b677a;
+  --fg-on-dark: #e8eef6;
+  --fg-on-dark-muted: #9aafc4;
+  --border: #d5dbe6;
+  --border-strong: #b0bac9;
+  --accent: #1f4e79;
+  --accent-hover: #163a5c;
+  --danger: #9b1c1c;
+  --warning: #9a6700;
+  --success: #0f6b3a;
+  --info: #1f4e79;
+  --gate-green: #0f6b3a;
+  --gate-amber: #9a6700;
+  --gate-red: #9b1c1c;
+  --demo: #6b4f1d;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --font-sans: var(--font-source-sans);
+  --font-mono: var(--font-ibm-plex-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-source-sans), "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.ops-table th,
+.ops-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.ops-table th {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  background: #eef1f6;
+  font-weight: 600;
+}
+
+.ops-table tr:hover td {
+  background: #f8fafc;
+}
+
+.panel {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.panel-header {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.panel-body {
+  padding: 1rem;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  background: #fff;
+  white-space: nowrap;
+}
+
+.badge-demo {
+  color: var(--demo);
+  border-color: #d6b56a;
+  background: #fff8e8;
+}
+
+.badge-green {
+  color: var(--gate-green);
+  border-color: #9ad4b3;
+  background: #eefaf3;
+}
+
+.badge-amber {
+  color: var(--gate-amber);
+  border-color: #e4c56a;
+  background: #fff8e6;
+}
+
+.badge-red {
+  color: var(--gate-red);
+  border-color: #e2a0a0;
+  background: #fdf1f1;
+}
+
+.badge-slate {
+  color: var(--fg-muted);
+  background: #f1f4f8;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.85rem;
+  border: 1px solid var(--border-strong);
+  background: #fff;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: #f3f6fa;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.field input {
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border-strong);
+  font: inherit;
+  background: #fff;
+}
+
+.field input:focus {
+  outline: 2px solid #8eb4d8;
+  outline-offset: 1px;
+}
+
+.muted {
+  color: var(--fg-muted);
+}
+
+.mono {
+  font-family: var(--font-ibm-plex-mono), ui-monospace, monospace;
+}
+
+.metric-value {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.metric-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+  font-weight: 600;
 }
