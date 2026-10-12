@@ -22,13 +22,28 @@ import {
   EvidenceBadge,
 } from "@/components/CommercialPanel";
 import { formatClosingDisplay } from "@/domain/deadlineParse";
+import { buildFounderReviewPack } from "@/domain/founderReviewPack";
+import { prepareFounderReviewAction } from "@/lib/rfq/actions";
+import { QuoteCaptureForm } from "@/components/QuoteCaptureForm";
+import { SupplierComparisonPanel } from "@/components/SupplierComparisonPanel";
+import { FounderCommercialControls } from "@/components/FounderCommercialControls";
+import {
+  buildBoqComparison,
+  isQuoteExpired,
+  recommendSourcingStrategy,
+  summariseSupplierQuotes,
+} from "@/domain/commercialComparison";
+import { evaluateSubmissionReadiness } from "@/domain/submissionReadiness";
+import { pricingEvidenceLabel } from "@/domain/pricingRefresh";
 
 const TABS = [
+  "decision",
   "overview",
   "specifications",
   "documents",
   "suppliers",
   "quotes",
+  "comparison",
   "pricing",
   "compliance",
   "approval",
@@ -48,38 +63,53 @@ export default async function RfqWorkspacePage({
   const sp = await searchParams;
   const tab = (TABS.includes(sp.tab as Tab) ? sp.tab : "overview") as Tab;
 
-  const rfq = await prisma.rfq.findUnique({
-    where: { id },
-    include: {
-      selectedCompany: true,
-      lineItems: { orderBy: { lineNumber: "asc" } },
-      requirements: true,
-      documents: true,
-      quotes: {
-        include: {
-          supplier: true,
-          lineItems: { include: { rfqLineItem: true } },
+  const [rfq, operationalCompanies, operationalSuppliers] = await Promise.all([
+    prisma.rfq.findUnique({
+      where: { id },
+      include: {
+        selectedCompany: true,
+        lineItems: { orderBy: { lineNumber: "asc" } },
+        requirements: true,
+        documents: true,
+        quotes: {
+          include: {
+            supplier: true,
+            lineItems: { include: { rfqLineItem: true } },
+          },
+          orderBy: { createdAt: "desc" },
+        },
+        enquiries: {
+          include: { supplier: true },
+          orderBy: { createdAt: "desc" },
+        },
+        sourcingRequests: {
+          include: { supplier: true },
+          orderBy: { reference: "asc" },
+        },
+        pricingScenarios: {
+          include: { lineItems: true },
+          orderBy: { createdAt: "desc" },
+        },
+        complianceItems: true,
+        statusEvents: {
+          include: { user: true },
+          orderBy: { createdAt: "desc" },
+          take: 20,
+        },
+        bids: {
+          include: { approvals: { include: { approver: true } } },
         },
       },
-      enquiries: {
-        include: { supplier: true },
-        orderBy: { createdAt: "desc" },
-      },
-      pricingScenarios: {
-        include: { lineItems: true },
-        orderBy: { createdAt: "desc" },
-      },
-      complianceItems: true,
-      statusEvents: {
-        include: { user: true },
-        orderBy: { createdAt: "desc" },
-        take: 20,
-      },
-      bids: {
-        include: { approvals: { include: { approver: true } } },
-      },
-    },
-  });
+    }),
+    prisma.company.findMany({
+      where: { isDemo: false, dataMode: "OPERATIONAL", isActive: true },
+      orderBy: { legalName: "asc" },
+    }),
+    prisma.supplier.findMany({
+      where: { isDemo: false, dataMode: "OPERATIONAL", emailVerified: true },
+      orderBy: { name: "asc" },
+    }),
+  ]);
 
   if (!rfq) notFound();
 
@@ -88,6 +118,175 @@ export default async function RfqWorkspacePage({
   const compliance = evaluateComplianceGate(rfq.complianceItems);
   const selectedPricing =
     rfq.pricingScenarios.find((s) => s.isSelected) ?? rfq.pricingScenarios[0];
+
+  let eligibilityVerdict: string | null = null;
+  let eligibilityExplanation: string | null = null;
+  let companyOverride = false;
+  try {
+    const sel = JSON.parse(rfq.companySelectionReason ?? "{}") as {
+      eligibility?: { verdict?: string; warnings?: string[] };
+      founderOverride?: boolean;
+    };
+    eligibilityVerdict = sel.eligibility?.verdict ?? null;
+    eligibilityExplanation = (sel.eligibility?.warnings ?? []).join("; ") || null;
+    companyOverride = Boolean(sel.founderOverride);
+  } catch {
+    /* ignore */
+  }
+
+  const founderPack = buildFounderReviewPack({
+    internalId: rfq.internalId,
+    title: rfq.title,
+    buyer: rfq.buyer,
+    closingDisplay: formatClosingDisplay(
+      rfq.closingAt,
+      rfq.closingTimeKnown,
+      rfq.timezone,
+    ),
+    hoursRemaining: deadline.hoursRemaining,
+    isClosed: deadline.isClosed,
+    classification: rfq.classification,
+    eligibilityVerdict,
+    eligibilityExplanation,
+    selectedCompanyName:
+      rfq.selectedCompany?.tradingName ?? rfq.selectedCompany?.legalName,
+    recommendedCompanyName: null,
+    companyOverride,
+    lineItems: rfq.lineItems.map((l) => ({
+      lineNumber: l.lineNumber,
+      description: l.description,
+      quantity: Number(l.quantity),
+      unit: l.unit,
+      brandRequirement: l.brandRequirement,
+    })),
+    suppliers: [
+      ...rfq.sourcingRequests.map((s) => ({
+        name: s.supplier.name,
+        email: s.recipientEmail,
+        lifecycleStatus: s.lifecycleStatus,
+      })),
+      ...rfq.enquiries.map((e) => ({
+        name: e.supplier.name,
+        email: e.supplier.email,
+        lifecycleStatus: e.deliveryState,
+      })),
+    ],
+    landedCost: selectedPricing ? Number(selectedPricing.landedCost) : null,
+    sellingPrice: selectedPricing
+      ? Number(selectedPricing.totalQuotation)
+      : null,
+    grossProfit: selectedPricing ? Number(selectedPricing.grossProfit) : null,
+    grossMarginPercent: selectedPricing
+      ? Number(selectedPricing.grossMarginPercent)
+      : null,
+    markupPercent: selectedPricing
+      ? Number(selectedPricing.markupPercent)
+      : null,
+    vatRegistered:
+      selectedPricing?.vatRegisteredSnapshot ??
+      rfq.selectedCompany?.vatRegistered,
+    evidenceQuality: selectedPricing?.evidenceQuality,
+    complianceBlocking: compliance.blockingItems.map((b) => b.label),
+    complianceComplete: rfq.complianceItems
+      .filter((c) =>
+        ["AVAILABLE", "COMPLETED", "VERIFIED", "NOT_REQUIRED"].includes(c.state),
+      )
+      .map((c) => c.label),
+    nextAction: rfq.nextAction,
+    nextActionReason: rfq.nextActionReason,
+    pipelineStatus: rfq.status,
+    emailTransport: "PENDING_EMAIL_INTEGRATION",
+  });
+
+  const comparisonOffers = rfq.quotes.flatMap((q) =>
+    q.lineItems
+      .filter((li) => li.rfqLineItemId)
+      .map((li) => ({
+        rfqLineItemId: li.rfqLineItemId!,
+        quoteId: q.id,
+        quoteLineId: li.id,
+        supplierId: q.supplierId,
+        supplierName: q.supplier.name,
+        unitCost: li.unitCost != null ? Number(li.unitCost) : null,
+        lineTotal: li.lineTotal != null ? Number(li.lineTotal) : null,
+        availability: li.availability,
+        brandSku: [li.brandOffered, li.sku].filter(Boolean).join(" / ") || null,
+        matchState: li.matchState,
+        evidenceType: q.evidenceType,
+        verificationState: q.verificationState,
+      })),
+  );
+
+  const comparisonRows = buildBoqComparison(
+    rfq.lineItems.map((l) => ({
+      id: l.id,
+      description: l.description,
+      quantity: Number(l.quantity),
+      unit: l.unit,
+    })),
+    comparisonOffers,
+  );
+
+  const quoteSummaries = summariseSupplierQuotes({
+    boqLineIds: rfq.lineItems.map((l) => l.id),
+    quotes: rfq.quotes.map((q) => ({
+      quoteId: q.id,
+      supplierId: q.supplierId,
+      supplierName: q.supplier.name,
+      evidenceType: q.evidenceType,
+      verificationState: q.verificationState,
+      subtotal: q.subtotal != null ? Number(q.subtotal) : null,
+      vatAmount: q.vatAmount != null ? Number(q.vatAmount) : null,
+      deliveryCost: q.deliveryCost != null ? Number(q.deliveryCost) : null,
+      deliveryKnown: q.deliveryKnown,
+      validUntil: q.validUntil,
+      leadTimeDays: q.leadTimeDays,
+      coveredLineIds: q.lineItems
+        .map((li) => li.rfqLineItemId)
+        .filter((x): x is string => Boolean(x)),
+      isCompleteClaim: q.isComplete,
+    })),
+  });
+
+  const sourcingRecommendation = recommendSourcingStrategy({
+    boq: rfq.lineItems.map((l) => ({
+      id: l.id,
+      quantity: Number(l.quantity),
+    })),
+    offers: comparisonOffers.map((o) => {
+      const q = rfq.quotes.find((x) => x.id === o.quoteId)!;
+      return {
+        ...o,
+        deliveryCost: q.deliveryCost != null ? Number(q.deliveryCost) : null,
+        deliveryKnown: q.deliveryKnown,
+        quoteExpired: isQuoteExpired(q.validUntil),
+      };
+    }),
+  });
+
+  const signaturesComplete = !rfq.complianceItems.some(
+    (c) =>
+      c.isMandatory &&
+      (c.itemKey === "signatures" || /signature|MBD/i.test(c.label)) &&
+      ["MISSING", "EXPIRED", "NEEDS_SIGNATURE"].includes(c.state),
+  );
+
+  const readiness = evaluateSubmissionReadiness({
+    companySelected: Boolean(rfq.selectedCompanyId),
+    eligibilityPassed:
+      eligibilityVerdict === "ELIGIBLE" ||
+      (eligibilityVerdict === "ELIGIBLE_WITH_WARNING" &&
+        Boolean(rfq.eligibilityWarningAcceptedAt)),
+    eligibilityWarningAccepted: Boolean(rfq.eligibilityWarningAcceptedAt),
+    eligibilityVerdict,
+    boqComplete: rfq.lineItems.length > 0,
+    verifiedSupplierPricing: rfq.pricingBasis === "VERIFIED_SUPPLIER",
+    sourcingStrategyConfirmed: rfq.sourcingStrategyConfirmed,
+    commercialsFounderApproved: Boolean(rfq.commercialsApprovedAt),
+    mandatoryComplianceComplete: compliance.submissionReady,
+    signaturesComplete,
+    unresolvedBlockingWarnings: [],
+  });
 
   return (
     <div className="space-y-4">
@@ -169,6 +368,110 @@ export default async function RfqWorkspacePage({
           );
         })}
       </div>
+
+      {tab === "decision" && (
+        <div className="space-y-3">
+          <div className="panel">
+            <div className="panel-header flex flex-wrap items-center justify-between gap-2">
+              <span>Founder decision pack — 12 operating questions</span>
+              <div className="flex flex-wrap gap-2">
+                <span
+                  className={`badge ${founderPack.readyForFounderReview ? "badge-green" : "badge-amber"}`}
+                >
+                  {founderPack.readyForFounderReview
+                    ? "READY FOR FOUNDER REVIEW"
+                    : "NOT READY FOR REVIEW"}
+                </span>
+                <span className="badge badge-slate">
+                  EMAIL: PENDING_EMAIL_INTEGRATION
+                </span>
+                <span className="badge badge-slate">AUTONOMY OFF</span>
+              </div>
+            </div>
+            <div className="panel-body space-y-3">
+              {founderPack.questions.map((q) => (
+                <div
+                  key={q.id}
+                  className="border border-[var(--border)] px-3 py-2"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="mono text-xs font-semibold text-[var(--fg-muted)]">
+                      Q{q.id}
+                    </span>
+                    <span className="font-semibold text-sm">{q.question}</span>
+                    <span
+                      className={`badge ${
+                        q.status === "ANSWERED"
+                          ? "badge-green"
+                          : q.status === "BLOCKED"
+                            ? "badge-red"
+                            : "badge-amber"
+                      }`}
+                    >
+                      {q.status}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-sm leading-relaxed">{q.answer}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-header">What Founder must do next</div>
+            <ol className="panel-body list-decimal space-y-1 pl-5 text-sm">
+              {founderPack.whatFounderMustDoNext.map((step) => (
+                <li key={step}>{step}</li>
+              ))}
+            </ol>
+          </div>
+
+          <div className="panel panel-body text-sm">
+            <div className="flex flex-wrap gap-2">
+              <span
+                className={`badge ${
+                  rfq.pricingBasis === "VERIFIED_SUPPLIER"
+                    ? "badge-green"
+                    : "badge-amber"
+                }`}
+              >
+                {pricingEvidenceLabel(rfq.pricingBasis)}
+              </span>
+              <span className="badge badge-slate">
+                Strategy: {rfq.sourcingStrategyType}
+                {rfq.sourcingStrategyConfirmed ? " · CONFIRMED" : " · UNCONFIRMED"}
+              </span>
+            </div>
+          </div>
+
+          <FounderCommercialControls
+            rfqId={rfq.id}
+            recommendedCompanyId={rfq.recommendedCompanyId}
+            selectedCompanyId={rfq.selectedCompanyId}
+            selectionReason={rfq.companySelectionReason}
+            companies={operationalCompanies}
+            pricingBasis={rfq.pricingBasis}
+            eligibilityVerdict={eligibilityVerdict}
+            eligibilityWarningAccepted={Boolean(rfq.eligibilityWarningAcceptedAt)}
+            commercialsApproved={Boolean(rfq.commercialsApprovedAt)}
+            readiness={readiness}
+          />
+
+          {rfq.status !== "FOUNDER_REVIEW" && (
+            <form action={prepareFounderReviewAction} className="panel panel-body">
+              <input type="hidden" name="rfqId" value={rfq.id} />
+              <p className="mb-3 text-sm text-[var(--fg-muted)]">
+                Generate compliance checklist, create Bid record, mark supplier
+                drafts as PENDING_EMAIL_INTEGRATION, and open Founder review.
+                Does not send email or submit the tender.
+              </p>
+              <button type="submit" className="btn btn-primary">
+                Prepare Founder review pack
+              </button>
+            </form>
+          )}
+        </div>
+      )}
 
       {tab === "overview" && (
         <div className="grid gap-3 lg:grid-cols-2">
@@ -540,8 +843,35 @@ export default async function RfqWorkspacePage({
 
       {tab === "quotes" && (
         <div className="space-y-3">
+          <QuoteCaptureForm
+            rfqId={rfq.id}
+            lines={rfq.lineItems.map((l) => ({
+              id: l.id,
+              lineNumber: l.lineNumber,
+              description: l.description,
+              quantity: Number(l.quantity),
+              unit: l.unit,
+              brandRequirement: l.brandRequirement,
+            }))}
+            suppliers={operationalSuppliers.map((s) => ({
+              id: s.id,
+              name: s.name,
+              email: s.email,
+            }))}
+            quotes={rfq.quotes.map((q) => ({
+              id: q.id,
+              supplierName: q.supplier.name,
+              evidenceType: q.evidenceType,
+              verificationState: q.verificationState,
+              quoteReference: q.quoteReference,
+              isComplete: q.isComplete,
+              deliveryKnown: q.deliveryKnown,
+              subtotal: q.subtotal != null ? Number(q.subtotal) : null,
+              validUntil: q.validUntil,
+            }))}
+          />
           <div className="panel overflow-x-auto">
-            <div className="panel-header">Quote comparison matrix</div>
+            <div className="panel-header">Mapped offers (all evidence types)</div>
             <table className="ops-table">
               <thead>
                 <tr>
@@ -653,15 +983,43 @@ export default async function RfqWorkspacePage({
         </div>
       )}
 
-      {tab === "pricing" && (
-        <CommercialPanel
-          scenario={
-            rfq.pricingScenarios.find((s) => s.isSelected) ??
-            rfq.pricingScenarios[0] ??
-            null
-          }
-          companyVatRegistered={rfq.selectedCompany?.vatRegistered}
+      {tab === "comparison" && (
+        <SupplierComparisonPanel
+          rfqId={rfq.id}
+          rows={comparisonRows}
+          summaries={quoteSummaries}
+          recommendation={sourcingRecommendation}
+          strategyConfirmed={rfq.sourcingStrategyConfirmed}
+          pricingBasis={rfq.pricingBasis}
         />
+      )}
+
+      {tab === "pricing" && (
+        <div className="space-y-3">
+          <div className="panel panel-body text-sm">
+            <span
+              className={`badge ${
+                rfq.pricingBasis === "VERIFIED_SUPPLIER"
+                  ? "badge-green"
+                  : "badge-amber"
+              }`}
+            >
+              {pricingEvidenceLabel(rfq.pricingBasis)}
+            </span>
+            <span className="muted ml-2 text-xs">
+              Markup ≠ margin. Historical scenarios are retained when pricing is
+              refreshed.
+            </span>
+          </div>
+          <CommercialPanel
+            scenario={
+              rfq.pricingScenarios.find((s) => s.isSelected) ??
+              rfq.pricingScenarios[0] ??
+              null
+            }
+            companyVatRegistered={rfq.selectedCompany?.vatRegistered}
+          />
+        </div>
       )}
 
       {tab === "compliance" && (
@@ -683,6 +1041,7 @@ export default async function RfqWorkspacePage({
                 <th>Mandatory</th>
                 <th>State</th>
                 <th>Notes</th>
+                <th>Evidence source</th>
               </tr>
             </thead>
             <tbody>
@@ -706,12 +1065,15 @@ export default async function RfqWorkspacePage({
                     </span>
                   </td>
                   <td className="text-xs">{item.notes ?? "—"}</td>
+                  <td className="muted text-xs">
+                    {item.evidenceSource ?? "—"}
+                  </td>
                 </tr>
               ))}
               {rfq.complianceItems.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="muted py-6 text-center">
-                    No compliance items.
+                  <td colSpan={5} className="muted py-6 text-center">
+                    No compliance items — run Prepare Founder review pack.
                   </td>
                 </tr>
               )}

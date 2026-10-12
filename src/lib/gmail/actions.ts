@@ -22,6 +22,30 @@ export async function mapGmailToCompanyAction(formData: FormData) {
     throw new Error("Can only map Gmail to operational (non-DEMO) companies");
   }
 
+  const account = await prisma.gmailAccount.findUnique({
+    where: { id: gmailAccountId },
+  });
+  if (!account) throw new Error("Gmail account not found");
+
+  const { assertMailboxMatchesCompany, isForbiddenSourcingMailbox } =
+    await import("@/domain/companyMailboxRegistry");
+
+  if (isForbiddenSourcingMailbox(account.emailAddress)) {
+    throw new Error(
+      `BLOCKED_FORBIDDEN_MAILBOX: ${account.emailAddress} cannot be mapped for company sourcing`,
+    );
+  }
+
+  const mailbox = assertMailboxMatchesCompany({
+    legalName: company.legalName,
+    tradingName: company.tradingName,
+    registrationNumber: company.registrationNumber,
+    candidateGmail: account.emailAddress,
+  });
+  if (!mailbox.ok) {
+    throw new Error(`${mailbox.code}: ${mailbox.blockers.join("; ")}`);
+  }
+
   await prisma.gmailAccount.update({
     where: { id: gmailAccountId },
     data: {
@@ -33,12 +57,21 @@ export async function mapGmailToCompanyAction(formData: FormData) {
     },
   });
 
+  await prisma.company.update({
+    where: { id: companyId },
+    data: { approvedSourcingMailbox: mailbox.approvedGmail },
+  });
+
   await writeAuditEvent({
     action: "GMAIL_MAPPED",
     entityType: "GmailAccount",
     entityId: gmailAccountId,
     userId: user.id,
-    newState: { companyId, company: company.legalName },
+    newState: {
+      companyId,
+      company: company.legalName,
+      approvedGmail: mailbox.approvedGmail,
+    },
   });
 
   revalidatePath("/settings/gmail");

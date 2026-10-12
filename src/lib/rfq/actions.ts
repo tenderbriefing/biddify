@@ -216,6 +216,103 @@ export async function overrideQualificationAction(formData: FormData) {
   revalidatePath("/");
 }
 
+export async function selectBiddingCompanyAction(formData: FormData) {
+  const session = await getSession();
+  if (!session || !hasPermission(session.role, "rfq:write")) {
+    throw new Error("Not authorised to select bidding company");
+  }
+
+  const rfqId = String(formData.get("rfqId") ?? "");
+  const companyId = String(formData.get("companyId") ?? "");
+  const overrideReason = String(formData.get("overrideReason") ?? "").trim();
+
+  const rfq = await prisma.rfq.findUnique({ where: { id: rfqId } });
+  if (!rfq) throw new Error("RFQ not found");
+
+  const company = await prisma.company.findUnique({ where: { id: companyId } });
+  if (!company || company.isDemo || company.dataMode === "TEST") {
+    throw new Error("Can only select operational (non-DEMO) companies");
+  }
+
+  const isOverride =
+    Boolean(rfq.recommendedCompanyId) &&
+    rfq.recommendedCompanyId !== companyId;
+
+  if (isOverride && !overrideReason) {
+    throw new Error("Override reason required when changing recommended company");
+  }
+
+  await prisma.rfq.update({
+    where: { id: rfqId },
+    data: {
+      selectedCompanyId: companyId,
+      companySelectionReason: JSON.stringify({
+        ...(rfq.companySelectionReason
+          ? (() => {
+              try {
+                return JSON.parse(rfq.companySelectionReason);
+              } catch {
+                return {};
+              }
+            })()
+          : {}),
+        founderOverride: isOverride,
+        overrideReason: isOverride ? overrideReason : undefined,
+        selectedAt: new Date().toISOString(),
+        selectedBy: session.email,
+      }),
+    },
+  });
+
+  await writeAuditEvent({
+    action: isOverride ? "COMPANY_OVERRIDE" : "COMPANY_SELECTED",
+    entityType: "Rfq",
+    entityId: rfqId,
+    userId: session.id,
+    previousState: {
+      selectedCompanyId: rfq.selectedCompanyId,
+      recommendedCompanyId: rfq.recommendedCompanyId,
+    },
+    newState: {
+      selectedCompanyId: companyId,
+      company: company.legalName,
+      override: isOverride,
+      overrideReason: isOverride ? overrideReason : null,
+    },
+  });
+
+  revalidatePath(`/rfqs/${rfqId}`);
+  revalidatePath("/opportunities");
+  revalidatePath("/founder-queue");
+}
+
+export async function prepareFounderReviewAction(formData: FormData) {
+  const session = await getSession();
+  if (
+    !session ||
+    (!hasPermission(session.role, "approval:review") &&
+      !hasPermission(session.role, "rfq:write"))
+  ) {
+    throw new Error("Not authorised");
+  }
+
+  const rfqId = String(formData.get("rfqId") ?? "");
+  const rfq = await prisma.rfq.findUnique({ where: { id: rfqId } });
+  if (!rfq) throw new Error("RFQ not found");
+
+  const { prepareFounderReviewForRfq } = await import(
+    "@/services/bid/prepareFounderReview"
+  );
+  await prepareFounderReviewForRfq(prisma, rfq.internalId, {
+    actorUserId: session.id,
+  });
+
+  revalidatePath(`/rfqs/${rfqId}`);
+  revalidatePath("/founder-queue");
+  revalidatePath("/opportunities");
+  revalidatePath("/");
+}
+
 export async function proceedToReviewAction(formData: FormData) {
   const session = await getSession();
   if (!session || !hasPermission(session.role, "rfq:qualify")) {

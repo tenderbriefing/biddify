@@ -8,6 +8,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { prisma } from "../src/lib/db";
 import { calculateCompanyReadiness } from "../src/domain/companyReadiness";
+import { resolveApprovedMailbox } from "../src/domain/companyMailboxRegistry";
 import { writeAuditEvent } from "../src/lib/audit";
 
 const VAULT = "/Users/billionaire/Desktop/Company Compliance ";
@@ -220,6 +221,15 @@ async function main() {
   });
 
   for (const spec of COMPANIES) {
+    const mailbox = resolveApprovedMailbox({
+      legalName: spec.legalName,
+      tradingName: spec.tradingName,
+      registrationNumber: spec.registrationNumber,
+    });
+    const approvedSourcingMailbox = mailbox.ok
+      ? mailbox.approvedGmail
+      : null;
+
     let company = await prisma.company.findFirst({
       where: { registrationNumber: spec.registrationNumber },
     });
@@ -250,6 +260,7 @@ async function main() {
           relatedCompanyGroupId: spec.relatedCompanyGroupId,
           relatedCompanyNotes: spec.relatedCompanyNotes,
           evidenceSource: spec.evidenceSource,
+          approvedSourcingMailbox,
           dataMode: "OPERATIONAL",
           isDemo: false,
           isActive: true,
@@ -282,6 +293,7 @@ async function main() {
           relatedCompanyGroupId: spec.relatedCompanyGroupId,
           relatedCompanyNotes: spec.relatedCompanyNotes,
           evidenceSource: spec.evidenceSource,
+          approvedSourcingMailbox,
           dataMode: "OPERATIONAL",
           isDemo: false,
         },

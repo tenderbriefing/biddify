@@ -9,15 +9,24 @@ import {
 const base = {
   company: {
     id: "co1",
+    legalName: "ORISON CHEMICALS",
+    tradingName: "Orison Chemicals",
+    registrationNumber: "2014/277853/07",
     isDemo: false,
     dataMode: "OPERATIONAL" as const,
     outboundSourcingEnabled: true,
+    authorisedSourcingSignatoryName: "Ops User",
+    authorisedSourcingSignatoryEmail: "orisonchemcsd@gmail.com",
+    authorisedSourcingSignatoryConfirmedAt: new Date("2026-10-12"),
+    approvedSourcingMailbox: "orisonchemcsd@gmail.com",
   },
   gmail: {
     companyId: "co1",
+    emailAddress: "orisonchemcsd@gmail.com",
     sendingEnabled: true,
     connectionStatus: "CONNECTED",
   },
+  approvedSenderGmail: "orisonchemcsd@gmail.com",
   rfq: {
     isDemo: false,
     dataMode: "OPERATIONAL" as const,
@@ -111,6 +120,36 @@ describe("operational outbound guards", () => {
   it("allows autonomous send when all controls pass", () => {
     const result = evaluateOutboundGuards(base);
     expect(result.allowed).toBe(true);
+  });
+
+  it("blocks SmartProcure / sibling company Gmail even when authenticated", () => {
+    const result = evaluateOutboundGuards({
+      ...base,
+      gmail: {
+        ...base.gmail,
+        emailAddress: "smartprocure.ai@gmail.com",
+      },
+      approvedSenderGmail: "smartprocure.ai@gmail.com",
+    });
+    expect(result.allowed).toBe(false);
+    expect(result.blockers.some((b) => /MAILBOX|FORBIDDEN/i.test(b))).toBe(
+      true,
+    );
+  });
+
+  it("blocks missing approved signatory", () => {
+    const result = evaluateOutboundGuards({
+      ...base,
+      company: {
+        ...base.company,
+        authorisedSourcingSignatoryName: null,
+        authorisedSourcingSignatoryConfirmedAt: null,
+      },
+    });
+    expect(result.allowed).toBe(false);
+    expect(
+      result.blockers.some((b) => /BLOCKED_NO_APPROVED_SIGNATORY/.test(b)),
+    ).toBe(true);
   });
 
   it("rejects invented/placeholder emails", () => {

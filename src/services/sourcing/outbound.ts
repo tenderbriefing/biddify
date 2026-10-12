@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import { evaluateOutboundGuards } from "@/domain/operationalGuards";
+import { assertNoGovernmentLeak } from "@/domain/supplierFacingEmail";
 import { evaluateRateLimits } from "@/domain/rateLimit";
 import { writeAuditEvent } from "@/lib/audit";
 import { decryptSecret } from "@/lib/crypto/tokenVault";
@@ -105,6 +106,7 @@ export async function sendSourcingRequest(
     gmail: req.gmailAccount,
     rfq: req.rfq,
     supplier: req.supplier,
+    approvedSenderGmail: req.approvedSenderGmail,
     globalOutboundPaused: settings.globalOutboundPaused,
     outboundMode: settings.outboundMode,
     isCertificationBatch: req.certificationBatch,
@@ -113,6 +115,20 @@ export async function sendSourcingRequest(
   });
   if (!guard.allowed) {
     return { ok: false, blockers: guard.blockers };
+  }
+
+  if (
+    req.approvedSenderGmail &&
+    req.gmailAccount &&
+    req.approvedSenderGmail.toLowerCase() !==
+      req.gmailAccount.emailAddress.toLowerCase()
+  ) {
+    return {
+      ok: false,
+      blockers: [
+        "BLOCKED_MAILBOX_COMPANY_MISMATCH: refusing to send — authenticated Gmail ≠ job-locked approved sender (no substitution)",
+      ],
+    };
   }
 
   const sinceHour = new Date(Date.now() - 3600_000);
@@ -170,12 +186,23 @@ export async function sendSourcingRequest(
     return { ok: false, blockers: ["No Gmail account on sourcing request"] };
   }
 
+  const leaks = assertNoGovernmentLeak(`${req.subject}\n${req.body}`);
+  if (leaks.length > 0) {
+    return {
+      ok: false,
+      blockers: [
+        `Supplier-facing content leaks restricted terms: ${leaks.join(", ")}`,
+      ],
+    };
+  }
+
   const accessToken = await resolveAccessToken(prisma, req.gmailAccountId);
 
-  // Ambiguous prior attempt? Check Sent before sending.
+  // Ambiguous prior attempt? Check Sent before sending (neutral external ref).
+  const sentMarker = req.externalReference ?? req.reference;
   const prior = await findSentByQuery({
     accessToken,
-    query: `"${req.reference}"`,
+    query: `"${sentMarker}"`,
   });
   if (prior[0]) {
     await prisma.sourcingRequest.update({
@@ -195,9 +222,21 @@ export async function sendSourcingRequest(
     };
   }
 
+  const fromAddress = req.approvedSenderGmail ?? req.gmailAccount.emailAddress;
+  if (
+    fromAddress.toLowerCase() !== req.gmailAccount.emailAddress.toLowerCase()
+  ) {
+    return {
+      ok: false,
+      blockers: [
+        "BLOCKED_MAILBOX_COMPANY_MISMATCH: transport cannot substitute a different sender",
+      ],
+    };
+  }
+
   const sendResult = await gmailSend({
     accessToken,
-    from: req.gmailAccount.emailAddress,
+    from: fromAddress,
     to: req.recipientEmail,
     subject: req.subject,
     bodyText: req.body,

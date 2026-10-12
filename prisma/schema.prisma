@@ -77,8 +77,23 @@ enum AuditAction {
   COMPLIANCE_VERIFIED
   FOUNDER_APPROVED
   FOUNDER_REJECTED
+  FOUNDER_REVIEW_PACK_READY
+  COMPANY_OVERRIDE
+  MARKUP_CHANGED
+  COMPLIANCE_GENERATED
   APPROVAL_INVALIDATED
   BID_SUBMITTED
+  BID_CREATED
+  SUPPLIER_QUOTE_CAPTURED
+  SUPPLIER_QUOTE_VERIFIED
+  SUPPLIER_QUOTE_REJECTED
+  SUPPLIER_SELECTION_RECOMMENDED
+  SUPPLIER_SELECTION_CONFIRMED
+  SUPPLIER_SELECTION_OVERRIDDEN
+  PRICING_REFRESHED_FROM_SUPPLIER_QUOTE
+  FOUNDER_COMMERCIALS_APPROVED
+  FOUNDER_COMMERCIALS_REJECTED
+  ELIGIBILITY_WARNING_ACCEPTED
   AWARD_RECORDED
   USER_LOGIN
   USER_LOGOUT
@@ -105,6 +120,7 @@ enum AuditAction {
   SOURCING_REQUEST_CREATED
   CERTIFICATION_PREVIEW
   CERTIFICATION_APPROVED
+  CERTIFICATION_SEND_BATCH
   EMAIL_SENT
   EMAIL_SEND_FAILED
   EMAIL_REPLY_INGESTED
@@ -190,9 +206,28 @@ enum DocumentProcessingState {
 
 enum ExtractionVerification {
   UNVERIFIED
+  EXTRACTED_UNVERIFIED
   VERIFIED
   CORRECTED
+  REJECTED
   UNKNOWN
+}
+
+enum SupplierVatStatus {
+  VAT_REGISTERED
+  NOT_VAT_REGISTERED
+  UNKNOWN
+}
+
+enum SourcingStrategyType {
+  SINGLE_SUPPLIER
+  SPLIT_AWARD
+  UNDECIDED
+}
+
+enum PricingBasis {
+  PROVISIONAL
+  VERIFIED_SUPPLIER
 }
 
 enum SpecMatchState {
@@ -218,6 +253,16 @@ enum EnquiryDeliveryState {
   FAILED
   HELD
   SUPPRESSED
+}
+
+/// Supplier sourcing lifecycle while email transport is deferred.
+/// Never use SENT/DELIVERED/REPLIED without confirmed email transport.
+enum SourcingLifecycleStatus {
+  DRAFT
+  READY_FOR_SOURCING
+  PENDING_EMAIL_INTEGRATION
+  QUOTE_RECEIVED_MANUALLY
+  CANCELLED
 }
 
 enum FactProvenance {
@@ -348,6 +393,13 @@ model Company {
   contactName        String?
   contactEmail       String?
   contactPhone       String?
+  /// Operational sourcing signatory — NOT inferred from CSD / Gmail profile / mailbox username.
+  authorisedSourcingSignatoryName String?
+  authorisedSourcingSignatoryEmail String?
+  authorisedSourcingSignatoryConfirmedAt DateTime?
+  authorisedSourcingSignatoryConfirmedBy String?
+  /// Registry-approved sourcing mailbox for this company (authoritative with domain registry).
+  approvedSourcingMailbox String?
   commodityNotes     String?
   commodityCategories String?
   geographicCoverage String?
@@ -577,6 +629,19 @@ model Rfq {
   capitalEfficiency     Float?
   fundingRequired       Boolean            @default(false)
   inFounderBidQueue     Boolean            @default(false)
+  /// Commercial sourcing plan (Founder must confirm SYSTEM_RECOMMENDATION).
+  sourcingStrategyType  SourcingStrategyType @default(UNDECIDED)
+  sourcingStrategyConfirmed Boolean        @default(false)
+  sourcingStrategyJson  String?
+  sourcingStrategyConfirmedAt DateTime?
+  sourcingStrategyConfirmedBy String?
+  commercialsApprovedAt DateTime?
+  commercialsApprovedBy String?
+  commercialsRejectedAt DateTime?
+  commercialsRejectionReason String?
+  eligibilityWarningAcceptedAt DateTime?
+  eligibilityWarningAcceptedBy String?
+  pricingBasis          PricingBasis       @default(PROVISIONAL)
   createdAt             DateTime           @default(now())
   updatedAt             DateTime           @updatedAt
 
@@ -700,9 +765,15 @@ model SupplierQuote {
   receivedAt       DateTime          @default(now())
   validUntil       DateTime?
   currency         String            @default("ZAR")
+  contactPerson    String?
+  supplierEmail    String?
+  /// Supplier VAT registration status — independent of bidding company VAT.
+  supplierVatStatus SupplierVatStatus @default(UNKNOWN)
   /// Null means delivery cost UNKNOWN — never treat as free.
   deliveryCost     Decimal?
   deliveryKnown    Boolean           @default(false)
+  deliveryLocation String?
+  deliveryTerms    String?
   leadTimeDays     Int?
   paymentTerms     String?
   /// Null means VAT treatment UNKNOWN — never invent.
@@ -714,6 +785,15 @@ model SupplierQuote {
   evidenceType     QuoteEvidenceType @default(UNKNOWN)
   verificationState ExtractionVerification @default(UNVERIFIED)
   sourceDocumentPath String?
+  sourceReference  String?
+  captureMethod    String            @default("MANUAL")
+  capturedBy       String?
+  capturedAt       DateTime          @default(now())
+  verifiedBy       String?
+  verifiedAt       DateTime?
+  rejectedBy       String?
+  rejectedAt       DateTime?
+  rejectionReason  String?
   notes            String?
   isComplete       Boolean           @default(false)
   isDemo           Boolean           @default(false)
@@ -727,6 +807,7 @@ model SupplierQuote {
   @@index([rfqId])
   @@index([supplierId])
   @@index([evidenceType])
+  @@index([verificationState])
 }
 
 model SupplierQuoteLineItem {
@@ -735,13 +816,18 @@ model SupplierQuoteLineItem {
   rfqLineItemId     String?
   description       String
   quantity          Decimal
+  unit              String?
   /// Null means unit price UNKNOWN — never invent zero.
   unitCost          Decimal?
   priceKnown        Boolean        @default(false)
   lineTotal         Decimal?
+  vatTreatment      String?
   brandOffered      String?
   modelOffered      String?
   sku               String?
+  manufacturer      String?
+  specificationNotes String?
+  complianceNotes   String?
   matchState        SpecMatchState @default(UNKNOWN)
   mappingConfidence Float?
   mappingNotes      String?
@@ -780,6 +866,9 @@ model PricingScenario {
   id                     String             @id @default(cuid())
   rfqId                  String
   name                   String             @default("Primary")
+  version                Int                @default(1)
+  previousScenarioId     String?
+  pricingBasis           PricingBasis       @default(PROVISIONAL)
   markupPercent          Decimal            @default(20)
   supplierCostTotal      Decimal            @default(0)
   /// Supplier invoice may include irrecoverable input VAT for non-VAT companies.
@@ -804,6 +893,7 @@ model PricingScenario {
   buyerPaymentTerms      String?
   financingAssumption    String?
   evidenceQuality        String?
+  evidenceQuoteIds       String?
   profitabilityGate      ProfitabilityGate  @default(UNREVIEWED)
   profitabilityReasons   String?
   vatRegisteredSnapshot  Boolean?
@@ -818,6 +908,7 @@ model PricingScenario {
   approvals Approval[]
 
   @@index([rfqId])
+  @@index([previousScenarioId])
 }
 
 model PricingLineItem {
@@ -847,11 +938,14 @@ model ComplianceRequirement {
   isMandatory Boolean              @default(true)
   state       ComplianceItemState  @default(MISSING)
   notes       String?
+  /// Evidence / source for this checklist item — never invent requirements without source.
+  evidenceSource String?
   createdAt   DateTime             @default(now())
   updatedAt   DateTime             @updatedAt
 
   rfq Rfq @relation(fields: [rfqId], references: [id], onDelete: Cascade)
 
+  @@unique([rfqId, itemKey])
   @@index([rfqId])
 }
 
@@ -1050,6 +1144,12 @@ model SourcingRequest {
   recipientEmail   String
   subject          String
   body             String
+  /// Neutral supplier-facing reference (e.g. RFQ-CONS-…). Internal BID refs stay on `reference`.
+  externalReference String?
+  /// Immutable approved sender from company mailbox registry — never substituted at send time.
+  approvedSenderGmail String?
+  /// Email-deferred lifecycle — PENDING_EMAIL_INTEGRATION until real transport exists.
+  lifecycleStatus  SourcingLifecycleStatus @default(DRAFT)
   strategy         SourcingStrategy     @default(FORMAL_SUPPLIER_QUOTE_REQUIRED)
   deliveryState    EnquiryDeliveryState @default(DRAFT_NOT_SENT)
   certificationBatch Boolean            @default(false)

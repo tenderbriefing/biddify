@@ -3,6 +3,11 @@
  * Real RFQs must never send via DEMO entities or invent commercial evidence.
  */
 
+import {
+  assertApprovedSignatory,
+  assertMailboxMatchesCompany,
+} from "./companyMailboxRegistry";
+
 export type GuardEntity = {
   isDemo?: boolean | null;
   dataMode?: "TEST" | "OPERATIONAL" | null;
@@ -11,13 +16,23 @@ export type GuardEntity = {
 export type OutboundGuardInput = {
   company: GuardEntity & {
     id: string;
+    legalName?: string | null;
+    tradingName?: string | null;
+    registrationNumber?: string | null;
     outboundSourcingEnabled?: boolean | null;
+    authorisedSourcingSignatoryName?: string | null;
+    authorisedSourcingSignatoryEmail?: string | null;
+    authorisedSourcingSignatoryConfirmedAt?: Date | null;
+    approvedSourcingMailbox?: string | null;
   };
   gmail?: {
     companyId?: string | null;
+    emailAddress?: string | null;
     sendingEnabled?: boolean | null;
     connectionStatus?: string | null;
   } | null;
+  /** Job-locked approved sender — if set, must match registry and live Gmail */
+  approvedSenderGmail?: string | null;
   rfq: GuardEntity & {
     isRealSource?: boolean | null;
   };
@@ -126,6 +141,29 @@ export function evaluateOutboundGuards(input: OutboundGuardInput): GuardResult {
     blockers.push("Company outbound sourcing DISABLED");
   }
 
+  const signatory = assertApprovedSignatory({
+    authorisedSourcingSignatoryName:
+      input.company.authorisedSourcingSignatoryName,
+    authorisedSourcingSignatoryConfirmedAt:
+      input.company.authorisedSourcingSignatoryConfirmedAt,
+  });
+  if (!signatory.ok) {
+    blockers.push(`${signatory.code}: ${signatory.blockers.join("; ")}`);
+  }
+
+  const mailbox = assertMailboxMatchesCompany({
+    legalName: input.company.legalName,
+    tradingName: input.company.tradingName,
+    registrationNumber: input.company.registrationNumber,
+    candidateGmail:
+      input.approvedSenderGmail ??
+      input.gmail?.emailAddress ??
+      input.company.approvedSourcingMailbox,
+  });
+  if (!mailbox.ok) {
+    blockers.push(`${mailbox.code}: ${mailbox.blockers.join("; ")}`);
+  }
+
   if (!input.gmail) {
     blockers.push("No Gmail account selected");
   } else {
@@ -140,6 +178,30 @@ export function evaluateOutboundGuards(input: OutboundGuardInput): GuardResult {
       gmailCompanyId: input.gmail.companyId,
     });
     blockers.push(...map.blockers);
+
+    // Live authenticated identity must equal registry-approved mailbox — no fallback.
+    if (mailbox.ok && input.gmail.emailAddress) {
+      const live = assertMailboxMatchesCompany({
+        legalName: input.company.legalName,
+        tradingName: input.company.tradingName,
+        registrationNumber: input.company.registrationNumber,
+        candidateGmail: input.gmail.emailAddress,
+      });
+      if (!live.ok) {
+        blockers.push(`${live.code}: ${live.blockers.join("; ")}`);
+      }
+    }
+
+    if (
+      input.approvedSenderGmail &&
+      input.gmail.emailAddress &&
+      input.approvedSenderGmail.toLowerCase() !==
+        input.gmail.emailAddress.toLowerCase()
+    ) {
+      blockers.push(
+        "BLOCKED_MAILBOX_COMPANY_MISMATCH: job-locked sender ≠ authenticated Gmail — no substitution allowed",
+      );
+    }
   }
 
   if (!isOperationalEntity(input.supplier) || input.supplier.isDemo) {

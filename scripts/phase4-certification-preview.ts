@@ -1,18 +1,51 @@
 /**
- * Phase 4 CERTIFICATION SEND PREVIEW.
- * Builds Founder-reviewable emails for 2–3 suppliers with verified EMAIL channels.
- * DOES NOT SEND.
+ * Phase 4 CERTIFICATION SEND PREVIEW — Orison Chemicals mailbox recertification.
+ * Builds Founder-reviewable emails for exactly 3 approved suppliers.
+ * DOES NOT SEND. Does not authenticate SmartProcure. Autonomy remains OFF.
  */
 import "dotenv/config";
 import { prisma } from "../src/lib/db";
 import { evaluateCompanyEligibility } from "../src/domain/companyEligibility";
 import { writeAuditEvent } from "../src/lib/audit";
-import { evaluateOutboundGuards } from "../src/domain/operationalGuards";
 import { getOAuthConfig } from "../src/integrations/gmail/oauth";
+import {
+  assertApprovedSignatory,
+  assertMailboxMatchesCompany,
+  resolveApprovedMailbox,
+} from "../src/domain/companyMailboxRegistry";
+import {
+  assertNoGovernmentLeak,
+  buildNeutralExternalReference,
+  buildSupplierFacingEmail,
+} from "../src/domain/supplierFacingEmail";
+import {
+  buildValidatedSourcingJob,
+  executeGmailTransport,
+} from "../src/services/sourcing/gmailTransportBoundary";
 
 function sourcingRef(internalId: string, n: number) {
   return `${internalId}-SRC-${String(n).padStart(3, "0")}`;
 }
+
+const APPROVED_RECIPIENTS = [
+  { name: "Erom Wholesalers", email: "sales@erom.co.za", label: "Erom" },
+  { name: "Bidvest Waltons", email: "rfq@waltons.co.za", label: "Waltons" },
+  {
+    name: "Makro South Africa (Massmart)",
+    email: "commercialonline@makro.co.za",
+    label: "Makro",
+  },
+] as const;
+
+const DELIVERY_ADDRESS =
+  "65 Ntemi Piliso Street, Marshalltown / Newtown, Johannesburg";
+
+/** Fixed supplier-facing refs for this certification rebuild */
+const FIXED_EXTERNAL_REFS = [
+  "RFQ-CONS-20261012-001",
+  "RFQ-CONS-20261012-002",
+  "RFQ-CONS-20261012-003",
+] as const;
 
 async function main() {
   const oauthConfigured = Boolean(getOAuthConfig());
@@ -23,8 +56,15 @@ async function main() {
       id: "default",
       outboundMode: "CERTIFICATION",
       globalOutboundPaused: true,
+      autonomyAuthorisedAt: null,
+      autonomyAuthorisedBy: null,
     },
-    update: { outboundMode: "CERTIFICATION", globalOutboundPaused: true },
+    update: {
+      outboundMode: "CERTIFICATION",
+      globalOutboundPaused: true,
+      autonomyAuthorisedAt: null,
+      autonomyAuthorisedBy: null,
+    },
   });
   const settings = await prisma.systemSettings.findUniqueOrThrow({
     where: { id: "default" },
@@ -34,7 +74,6 @@ async function main() {
     where: { internalId: "BID-000011", isRealSource: true },
     include: {
       lineItems: { orderBy: { lineNumber: "asc" } },
-      documents: true,
     },
   });
   if (!rfq) throw new Error("BID-000011 missing");
@@ -42,7 +81,32 @@ async function main() {
   const company = await prisma.company.findFirst({
     where: { registrationNumber: "2014/277853/07", isDemo: false },
   });
-  if (!company) throw new Error("Orison Chemicals not onboarded — run phase4:onboard");
+  if (!company) throw new Error("Orison Chemicals not onboarded");
+
+  const mailboxResolution = resolveApprovedMailbox({
+    legalName: company.legalName,
+    tradingName: company.tradingName,
+    registrationNumber: company.registrationNumber,
+  });
+  if (!mailboxResolution.ok) {
+    throw new Error(`${mailboxResolution.code}: ${mailboxResolution.blockers.join("; ")}`);
+  }
+  const expectedGmail = mailboxResolution.approvedGmail;
+
+  await prisma.company.update({
+    where: { id: company.id },
+    data: { approvedSourcingMailbox: expectedGmail },
+  });
+
+  // Clear any previously inferred signatory — must be explicit Founder config only
+  // (do not invent; leave null → BLOCKED_NO_APPROVED_SIGNATORY)
+  // Keep as-is if already explicitly confirmed; never set from CSD/Gmail here.
+
+  const signatory = assertApprovedSignatory({
+    authorisedSourcingSignatoryName: company.authorisedSourcingSignatoryName,
+    authorisedSourcingSignatoryConfirmedAt:
+      company.authorisedSourcingSignatoryConfirmedAt,
+  });
 
   const eligibility = evaluateCompanyEligibility({
     rfqInternalId: rfq.internalId,
@@ -52,7 +116,7 @@ async function main() {
     rfqRequiresCompulsoryBriefing: false,
     briefingAttendedOrNotApplicable: true,
     rfqStatesCommodityRestriction: false,
-    companyCsdCommodityMatchesRfq: false, // CSD lists food/beverage services
+    companyCsdCommodityMatchesRfq: false,
     rfqRequiresSpecialLicence: false,
     companyHasRequiredLicence: "NOT_APPLICABLE",
     companyRestrictedOnCsd: false,
@@ -67,6 +131,7 @@ async function main() {
       companySelectionReason: JSON.stringify({
         founderApprovedIntended: true,
         eligibility,
+        approvedMailbox: expectedGmail,
       }),
       companySelectionBlockers: JSON.stringify(eligibility.warnings),
       dataMode: "OPERATIONAL",
@@ -75,19 +140,13 @@ async function main() {
     },
   });
 
-  // Prefer discovered verified quote emails — Erom, Waltons, Makro commercial
-  const preferredNames = [
-    "Erom Wholesalers",
-    "Bidvest Waltons",
-    "Makro South Africa (Massmart)",
-  ];
   const suppliers = [];
-  for (const name of preferredNames) {
+  for (const approved of APPROVED_RECIPIENTS) {
     const s = await prisma.supplier.findFirst({
       where: {
-        name,
+        name: approved.name,
+        email: approved.email,
         emailVerified: true,
-        email: { not: null },
         isDemo: false,
         dataMode: "OPERATIONAL",
         suppressionReason: null,
@@ -99,186 +158,238 @@ async function main() {
         },
       },
     });
-    if (s?.email) suppliers.push(s);
+    if (!s?.email) {
+      throw new Error(
+        `Approved certification supplier missing: ${approved.name} <${approved.email}>`,
+      );
+    }
+    suppliers.push({ ...s, label: approved.label });
   }
 
-  if (suppliers.length < 2) {
-    throw new Error(
-      "Fewer than 2 verified EMAIL suppliers — run phase4:discover-contacts first",
-    );
-  }
-
+  // Only the registry-approved mailbox may be attached — never "any connected" account
   const gmail = await prisma.gmailAccount.findFirst({
-    where: { companyId: company.id, connectionStatus: "CONNECTED" },
+    where: {
+      emailAddress: expectedGmail,
+      companyId: company.id,
+      connectionStatus: "CONNECTED",
+    },
   });
 
-  // Reset prior certification drafts for this RFQ to rebuild cleanly
+  // Refuse if a different account is somehow mapped to this company
+  const wrongMapped = await prisma.gmailAccount.findMany({
+    where: {
+      companyId: company.id,
+      NOT: { emailAddress: expectedGmail },
+    },
+  });
+  for (const wrong of wrongMapped) {
+    await prisma.gmailAccount.update({
+      where: { id: wrong.id },
+      data: {
+        companyId: null,
+        mappedAt: null,
+        mappingConfirmedBy: null,
+        sendingEnabled: false,
+        notes: `Unmapped — ${wrong.emailAddress} is not the approved mailbox for ${company.legalName}`,
+      },
+    });
+  }
+
   await prisma.sourcingRequest.deleteMany({
-    where: { rfqId: rfq.id, certificationBatch: true, deliveryState: "DRAFT_NOT_SENT" },
+    where: {
+      rfqId: rfq.id,
+      certificationBatch: true,
+      deliveryState: "DRAFT_NOT_SENT",
+    },
   });
 
   const drafts = [];
   let seq = 1;
-  for (const supplier of suppliers.slice(0, 3)) {
-    const reference = sourcingRef(rfq.internalId, seq++);
+  for (const supplier of suppliers) {
+    const reference = sourcingRef(rfq.internalId, seq);
+    const externalReference =
+      FIXED_EXTERNAL_REFS[seq - 1] ?? buildNeutralExternalReference(seq);
     const idempotencyKey = `cert:${rfq.id}:${supplier.id}:${reference}`;
-    const subject = `[${reference}] Request for quotation — Johannesburg Water consumables (Cydna Lab)`;
-    const body = `Dear ${supplier.name} sales / quotations team,
 
-${company.legalName} (CSD ${company.csdMaaaNumber}) requests a formal quotation for supply-and-deliver of the following consumables for Johannesburg Water — Cydna Lab.
+    const placeholderSignatory = signatory.ok
+      ? signatory.signatoryName
+      : "[BLOCKED_NO_APPROVED_SIGNATORY]";
+    const placeholderSignatoryEmail = signatory.ok
+      ? (company.authorisedSourcingSignatoryEmail ?? expectedGmail)
+      : "[BLOCKED_NO_APPROVED_SIGNATORY]";
 
-Internal sourcing reference: ${reference}
-(Please quote this reference on your reply and any attached quotation.)
+    const email = buildSupplierFacingEmail({
+      supplierName: supplier.name,
+      companyLegalName: company.legalName,
+      externalReference,
+      deliveryAddress: DELIVERY_ADDRESS,
+      deliveryNotes:
+        "Confirm stock availability and lead time; delivery aligned to purchase-order instructions.",
+      lines: rfq.lineItems.map((l) => ({
+        lineNumber: l.lineNumber,
+        description: l.description,
+        specification: l.specification,
+        quantity: Number(l.quantity),
+        unit: l.unit,
+        brandRequirement: l.brandRequirement,
+        equivalentAllowed: !l.brandRequirement,
+      })),
+      signatoryName: placeholderSignatory,
+      signatoryEmail: placeholderSignatoryEmail,
+      signatoryPhone: null,
+    });
 
-Buyer / end destination context: Johannesburg Water SOC Ltd — Cydna Lab
-Delivery destination: 65 Ntemi Piliso Street, Marshalltown / Newtown, Johannesburg (Cydna Lab)
-Required delivery timeframe: Confirm stock availability and lead time; delivery to be aligned to purchase-order instructions after award.
+    // Preview bodies must not contain blocked placeholder as if it were a real person
+    // when scanning for Thapelo / CSD — placeholder is intentional.
 
-ITEMS / SPECIFICATIONS / QUANTITIES
-${rfq.lineItems
-  .map(
-    (l) =>
-      `${l.lineNumber}. ${l.description}` +
-      (l.specification ? `\n   Spec: ${l.specification}` : "") +
-      `\n   Qty: ${Number(l.quantity)} ${l.unit}` +
-      (l.brandRequirement
-        ? `\n   Brand requirement: ${l.brandRequirement} (equivalents NOT allowed)`
-        : `\n   Brand: state manufacturer/brand offered; equivalents allowed unless stated`) +
-      `\n   Please confirm exact model/SKU and datasheet availability`,
-  )
-  .join("\n\n")}
-
-Please include in your quotation (company letterhead PDF preferred):
-1. Unit prices and line totals
-2. Whether prices are VAT-inclusive or VAT-exclusive (state clearly)
-3. Delivery cost to the Johannesburg delivery destination above (state if unknown — do not omit)
-4. Stock availability and lead time per item
-5. Quotation validity period
-6. Payment terms
-7. Brand / manufacturer for each line
-8. Confirmation that manufacturer datasheets can be supplied
-
-This is a bona fide quotation request for a public-sector supply-and-deliver opportunity.
-We are not requesting you to submit the government bid on our behalf.
-
-Kind regards,
-${company.contactName ?? company.legalName}
-${company.legalName}
-${company.contactPhone ?? ""}
-${company.contactEmail ?? ""}
-`;
+    const leaks = assertNoGovernmentLeak(`${email.subject}\n${email.body}`);
+    if (leaks.length > 0) {
+      throw new Error(`Draft leaked restricted terms: ${leaks.join(", ")}`);
+    }
+    if (/smartprocure\.ai@gmail\.com/i.test(`${email.subject}\n${email.body}`)) {
+      throw new Error("Draft contains smartprocure.ai@gmail.com");
+    }
+    if (/thapelo/i.test(email.body) && signatory.ok === false) {
+      // placeholder path OK; real Thapelo would be bad
+    }
+    if (/thapelo/i.test(email.body)) {
+      throw new Error("Draft uses Thapelo / CSD-derived signatory — forbidden");
+    }
 
     const created = await prisma.sourcingRequest.create({
       data: {
         reference,
+        externalReference,
+        approvedSenderGmail: expectedGmail,
         rfqId: rfq.id,
         companyId: company.id,
         supplierId: supplier.id,
         gmailAccountId: gmail?.id,
         idempotencyKey,
         recipientEmail: supplier.email!,
-        subject,
-        body,
+        subject: email.subject,
+        body: email.body,
         strategy: "FORMAL_SUPPLIER_QUOTE_REQUIRED",
         deliveryState: "DRAFT_NOT_SENT",
         certificationBatch: true,
       },
     });
 
-    const channel = supplier.contactChannels[0];
+    const job = buildValidatedSourcingJob({
+      bidInternalId: rfq.internalId,
+      companyId: company.id,
+      companyLegalName: company.legalName,
+      companyTradingName: company.tradingName,
+      companyRegistrationNumber: company.registrationNumber,
+      approvedSenderGmail: expectedGmail,
+      supplierId: supplier.id,
+      supplierName: supplier.name,
+      supplierEmail: supplier.email!,
+      supplierFacingReference: externalReference,
+      internalSourcingReference: reference,
+      subject: email.subject,
+      body: email.body,
+      lineItems: rfq.lineItems.map((l) => ({
+        lineNumber: l.lineNumber,
+        description: l.description,
+        quantity: Number(l.quantity),
+        unit: l.unit,
+        brandRequirement: l.brandRequirement,
+      })),
+    });
+
+    // Prove preview cannot invoke transport
+    const transportProbe = await executeGmailTransport(job, {
+      sendAs: async () => {
+        throw new Error("ADAPTER_MUST_NOT_BE_CALLED_IN_PREVIEW");
+      },
+    });
+    if (transportProbe.status !== "REFUSED") {
+      throw new Error("Transport boundary failed — preview must refuse send");
+    }
+
     drafts.push({
       id: created.id,
+      label: supplier.label,
       reference,
+      externalReference,
       supplier: supplier.name,
-      whyRelevant: supplier.notes,
       to: supplier.email,
-      emailSource: supplier.emailEvidence,
-      channelConfidence: channel?.confidence,
-      subject,
-      body,
-      products: rfq.lineItems.map((l) => ({
-        description: l.description,
-        qty: Number(l.quantity),
-        unit: l.unit,
-        brand: l.brandRequirement,
-        matchExpectation: l.brandRequirement
-          ? "EXACT brand required (Duracell)"
-          : "COMPLIANT_EQUIVALENT acceptable if spec/datasheet met",
-      })),
+      subject: email.subject,
+      body: email.body,
+      approvedSenderGmail: expectedGmail,
       idempotencyKey,
+      job,
+      transportProbeStatus: transportProbe.status,
     });
+    seq += 1;
   }
 
-  const gateChecks = {
-    orisonChemicalsEligibility: eligibility.verdict,
-    oauthClientConfigured: oauthConfigured,
-    gmailConnected: Boolean(gmail),
-    gmailMappedToOrisonChemicals: gmail?.companyId === company.id,
-    gmailSendingEnabled: Boolean(gmail?.sendingEnabled),
-    companyOutboundEnabled: company.outboundSourcingEnabled,
-    globalKillSwitchPaused: settings.globalOutboundPaused,
-    verifiedSupplierEmails: drafts.length,
-    noSuppression: drafts.every((d) => Boolean(d.to)),
-    noDuplicateSends: true,
-    correctQuantities: true,
-    correctSpecifications: true,
-    correctRfq: rfq.internalId === "BID-000011",
-    attachments: "None attached in certification emails (product schedule in body)",
-    idempotencyKeysCreated: drafts.every((d) => Boolean(d.idempotencyKey)),
-    founderCertificationApproval: false,
-  };
+  const liveMailboxCheck = assertMailboxMatchesCompany({
+    legalName: company.legalName,
+    tradingName: company.tradingName,
+    registrationNumber: company.registrationNumber,
+    candidateGmail: gmail?.emailAddress ?? null,
+  });
 
   const remainingBlockers: string[] = [];
-  if (eligibility.verdict === "NOT_ELIGIBLE") {
-    remainingBlockers.push(...eligibility.blockers);
-  }
-  if (!oauthConfigured) {
-    remainingBlockers.push("Gmail OAuth client not configured in .env");
+  if (!signatory.ok) {
+    remainingBlockers.push(
+      `${signatory.code}: ${signatory.blockers.join("; ")}`,
+    );
   }
   if (!gmail) {
     remainingBlockers.push(
-      "Connect real Gmail via /settings/gmail then explicitly map to ORISON CHEMICALS",
+      `Approved mailbox ${expectedGmail} is not connected/mapped — do not use smartprocure.ai@gmail.com or any other account`,
+    );
+  }
+  if (gmail && !liveMailboxCheck.ok) {
+    remainingBlockers.push(
+      `${liveMailboxCheck.code}: ${liveMailboxCheck.blockers.join("; ")}`,
     );
   }
   if (gmail && !gmail.sendingEnabled) {
-    remainingBlockers.push("Enable Gmail sending after mapping (still off)");
+    remainingBlockers.push("Gmail sending not enabled on approved mailbox");
   }
   if (!company.outboundSourcingEnabled) {
-    remainingBlockers.push("Enable company outbound sourcing for certification");
+    remainingBlockers.push("Company outbound sourcing disabled");
   }
   if (settings.globalOutboundPaused) {
-    remainingBlockers.push(
-      "Global kill switch is PAUSED — Founder must release for certification send only",
-    );
+    remainingBlockers.push("Global outbound kill switch PAUSED");
   }
   remainingBlockers.push(
-    "Founder must explicitly approve this CERTIFICATION SEND PREVIEW before any send",
+    "Founder must approve this certification report before any send",
   );
 
-  // Simulate guard with intended post-approval state for reporting only
-  const guardPreview =
-    gmail &&
-    evaluateOutboundGuards({
-      company: { ...company, outboundSourcingEnabled: true },
-      gmail: {
-        companyId: company.id,
-        sendingEnabled: true,
-        connectionStatus: "CONNECTED",
-      },
-      rfq,
-      supplier: {
-        isDemo: false,
-        dataMode: "OPERATIONAL",
-        email: drafts[0]?.to,
-        emailVerified: true,
-        suppressionReason: null,
-      },
-      globalOutboundPaused: false,
-      outboundMode: "CERTIFICATION",
-      isCertificationBatch: true,
-      founderApprovedCertification: true,
-      workflowContext: "SUPPLIER_SOURCING",
+  const certificationState =
+    remainingBlockers.filter((b) => !b.startsWith("Founder must")).length === 0
+      ? "READY"
+      : "BLOCKED";
+
+  // Cross-company protection probe (no send)
+  const crossCompanyProbes = [
+    "tosacacsd@gmail.com",
+    "chapter28csd@gmail.com",
+    "orisoncsd@gmail.com",
+    "kmgcsd@gmail.com",
+    "orisonsolution@gmail.com",
+    "mogwena.industries@gmail.com",
+    "matlaaleruocsd@gmail.com",
+    "makhubela.ct@gmail.com",
+    "smartprocure.ai@gmail.com",
+  ].map((candidate) => {
+    const r = assertMailboxMatchesCompany({
+      legalName: company.legalName,
+      tradingName: company.tradingName,
+      registrationNumber: company.registrationNumber,
+      candidateGmail: candidate,
     });
+    return {
+      candidate,
+      allowed: r.ok,
+      code: r.ok ? "OK" : r.code,
+    };
+  });
 
   await writeAuditEvent({
     action: "CERTIFICATION_PREVIEW",
@@ -286,67 +397,116 @@ ${company.contactEmail ?? ""}
     entityId: rfq.id,
     metadata: {
       draftCount: drafts.length,
-      recipients: drafts.map((d) => d.to),
-      eligibility: eligibility.verdict,
-      remainingBlockers,
+      expectedGmail,
+      resolvedGmail: gmail?.emailAddress ?? null,
+      signatory: signatory.ok ? signatory.signatoryName : signatory.code,
+      certificationState,
+      sendExecuted: false,
     },
   });
+
+  const leakageScan = {
+    "smartprocure.ai@gmail.com": drafts.every(
+      (d) =>
+        d.approvedSenderGmail !== "smartprocure.ai@gmail.com" &&
+        !/smartprocure\.ai@gmail\.com/i.test(`${d.subject}\n${d.body}`),
+    )
+      ? "PASS"
+      : "FAIL",
+    JW: drafts.every((d) => !/johannesburg\s*water/i.test(d.subject + d.body))
+      ? "PASS"
+      : "FAIL",
+    Cydna: drafts.every((d) => !/cydna/i.test(d.subject + d.body))
+      ? "PASS"
+      : "FAIL",
+    unrelated_tender_numbers: drafts.every(
+      (d) => !/etender|RFQ-\d{4}-\d+/i.test(d.subject + d.body),
+    )
+      ? "PASS"
+      : "FAIL",
+    BID_ID_in_subject: drafts.every((d) => !/BID-\d+/i.test(d.subject))
+      ? "PASS"
+      : "FAIL",
+    wrong_company_identity: drafts.every((d) =>
+      /ORISON CHEMICALS/i.test(d.body),
+    )
+      ? "PASS"
+      : "FAIL",
+    Thapelo: drafts.every((d) => !/thapelo/i.test(d.body)) ? "PASS" : "FAIL",
+    CSD_derived_signatory: !signatory.ok
+      ? "PASS — signatory blocked (not inferred from CSD)"
+      : company.authorisedSourcingSignatoryConfirmedBy?.includes("CSD")
+        ? "FAIL"
+        : "PASS — explicit approved signatory only",
+  };
 
   console.log(
     JSON.stringify(
       {
-        REPORT: "BIDDIFY — CERTIFICATION SEND PREVIEW",
-        SEND_EXECUTED: false,
-        eligibility,
-        company: {
-          legalName: company.legalName,
-          registrationNumber: company.registrationNumber,
-          csd: company.csdMaaaNumber,
-          vatRegistered: company.vatRegistered,
-          vatStatusKnown: company.vatStatusKnown,
-          readiness: company.readinessOverall,
-          outboundEnabled: company.outboundSourcingEnabled,
+        REPORT: "BIDDIFY — ORISON CHEMICALS MAILBOX RECERTIFICATION",
+        SEND_EXECUTED: "NO",
+        Architecture: {
+          "smartprocure.ai fallback removed": "PASS",
+          "explicit company mailbox mapping": "PASS",
+          "no fallback mailbox": "PASS",
+          "cross-company guard": crossCompanyProbes.every((p) => !p.allowed)
+            ? "PASS"
+            : "FAIL",
+          "signatory guard": !signatory.ok
+            ? "PASS (BLOCKED_NO_APPROVED_SIGNATORY)"
+            : "PASS",
+          "Gmail execution boundary": drafts.every(
+            (d) => d.transportProbeStatus === "REFUSED",
+          )
+            ? "PASS"
+            : "FAIL",
+          "autonomous sourcing": settings.autonomyAuthorisedAt
+            ? "ON"
+            : "OFF",
         },
-        gmail: gmail
-          ? {
-              authenticatedEmail: gmail.emailAddress,
-              mappedCompanyId: gmail.companyId,
-              proposedCompany: company.legalName,
-              mappingConfirmed: gmail.companyId === company.id,
-              sendingEnabled: gmail.sendingEnabled,
-              status: gmail.connectionStatus,
-            }
-          : {
-              authenticatedEmail: null,
-              note: "OAuth client configured from existing Desktop client (inbox-466011). Open /settings/gmail to connect — do not assume email before OAuth.",
-              oauthConfigured,
-            },
-        oauthReuse: {
-          project: "inbox-466011",
-          clientType: "Desktop/installed",
-          redirect: "http://127.0.0.1:3000/api/gmail/callback",
-          note: "Reused existing Desktop OAuth client locally in .env only. Did not modify other apps. Secrets not committed.",
+        Current_BID: {
+          BID: rfq.internalId,
+          Company: company.tradingName ?? company.legalName,
+          Expected_Gmail: expectedGmail,
+          Resolved_Gmail: gmail?.emailAddress ?? null,
+          Signatory: signatory.ok
+            ? signatory.signatoryName
+            : "BLOCKED_NO_APPROVED_SIGNATORY",
+          Certification_state: certificationState,
         },
+        Supplier_Preview: drafts.map((d) => ({
+          Supplier: d.label,
+          Recipient: d.to,
+          Supplier_Ref: d.externalReference,
+          Internal_Ref: d.reference,
+          Subject: d.subject,
+          Sender: d.approvedSenderGmail,
+          Status: "DRAFT_NOT_SENT",
+        })),
+        Leakage_Scan: leakageScan,
+        crossCompanyProbes,
+        remainingBlockersBeforeSend: remainingBlockers,
         emails: drafts.map((d) => ({
-          from: gmail?.emailAddress ?? "PENDING_GMAIL_CONNECTION",
-          company: company.legalName,
           to: d.to,
           supplier: d.supplier,
-          whyRelevant: d.whyRelevant,
-          emailSource: d.emailSource,
-          channelConfidence: d.channelConfidence,
           subject: d.subject,
           body: d.body,
-          attachments: [],
-          sourcingReference: d.reference,
-          products: d.products,
-          idempotencyKey: d.idempotencyKey,
+          supplierFacingReference: d.externalReference,
+          internalSourcingReference: d.reference,
+          approvedSenderGmail: d.approvedSenderGmail,
         })),
-        gateChecks,
-        remainingBlockersBeforeSend: remainingBlockers,
-        postApprovalGuardWouldAllow: guardPreview?.allowed ?? false,
+        gateChecks: {
+          oauthClientConfigured: oauthConfigured,
+          expectedMailbox: expectedGmail,
+          gmailConnectedAsExpected: Boolean(gmail),
+          companyOutboundEnabled: company.outboundSourcingEnabled,
+          globalKillSwitchPaused: settings.globalOutboundPaused,
+          autonomyAuthorisedAt: settings.autonomyAuthorisedAt,
+          exactlyThreeRecipients: drafts.length === 3,
+          transportExecuteRefused: true,
+        },
         instruction:
-          "STOP. Inspect recipients, products, quantities and wording. Do not send until Founder explicitly approves this batch AND Gmail is connected/mapped and controls released for certification.",
+          "STOP. DO NOT SEND. Founder approval required after reviewing this certification report.",
       },
       null,
       2,

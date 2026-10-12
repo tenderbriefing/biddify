@@ -21,6 +21,9 @@
     "phase4:onboard": "tsx scripts/phase4-onboard-companies.ts",
     "phase4:discover-contacts": "tsx scripts/phase4-discover-supplier-contacts.ts",
     "phase4:cert-preview": "tsx scripts/phase4-certification-preview.ts",
+    "phase4:gmail-connect": "tsx scripts/gmail-oauth-connect.ts",
+    "phase4:cert-send": "tsx scripts/phase4-certification-send.ts",
+    "prepare:founder-review": "tsx scripts/prepare-founder-review.ts",
     "secret-scan": "bash scripts/secret-scan.sh",
     "gate": "npm run lint && npm run typecheck && npm run test && npm run build && npm run secret-scan",
     "postinstall": "prisma generate"
