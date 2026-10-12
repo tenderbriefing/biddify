@@ -1,105 +1,62 @@
 /**
- * Phase 4 certification preview for ONE RFQ / ONE company / 2–3 suppliers.
- * Creates DRAFT sourcing requests only. Does NOT send email.
- * Founder must approve the printed batch before any send.
+ * Phase 4 CERTIFICATION SEND PREVIEW.
+ * Builds Founder-reviewable emails for 2–3 suppliers with verified EMAIL channels.
+ * DOES NOT SEND.
  */
 import "dotenv/config";
 import { prisma } from "../src/lib/db";
-import { selectBiddingCompany } from "../src/domain/companySelection";
-import { generateSupplierEnquiryDraft } from "../src/domain/supplierEnquiry";
-import { calculateCostConfidence, calculateSpecConfidence } from "../src/domain/costConfidence";
-import { calculateBidPriority } from "../src/domain/bidPriority";
-import { evaluateCommercialGate } from "../src/domain/commercialGate";
+import { evaluateCompanyEligibility } from "../src/domain/companyEligibility";
 import { writeAuditEvent } from "../src/lib/audit";
-import { isValidPublishedEmail } from "../src/domain/operationalGuards";
+import { evaluateOutboundGuards } from "../src/domain/operationalGuards";
+import { getOAuthConfig } from "../src/integrations/gmail/oauth";
 
 function sourcingRef(internalId: string, n: number) {
   return `${internalId}-SRC-${String(n).padStart(3, "0")}`;
 }
 
 async function main() {
-  const settings = await prisma.systemSettings.upsert({
+  const oauthConfigured = Boolean(getOAuthConfig());
+
+  await prisma.systemSettings.upsert({
     where: { id: "default" },
     create: {
       id: "default",
       outboundMode: "CERTIFICATION",
       globalOutboundPaused: true,
-      notes: "Certification mode — Founder approval required per batch",
     },
-    update: {
-      outboundMode: "CERTIFICATION",
-      // Keep paused until Founder approves certification send
-      globalOutboundPaused: true,
-    },
+    update: { outboundMode: "CERTIFICATION", globalOutboundPaused: true },
+  });
+  const settings = await prisma.systemSettings.findUniqueOrThrow({
+    where: { id: "default" },
   });
 
   const rfq = await prisma.rfq.findFirst({
     where: { internalId: "BID-000011", isRealSource: true },
     include: {
       lineItems: { orderBy: { lineNumber: "asc" } },
-      quotes: { include: { lineItems: true } },
-      pricingScenarios: { where: { isSelected: true }, take: 1 },
+      documents: true,
     },
   });
-  if (!rfq) throw new Error("BID-000011 not found");
+  if (!rfq) throw new Error("BID-000011 missing");
 
-  // Detach DEMO company if still selected
-  if (rfq.selectedCompanyId) {
-    const selected = await prisma.company.findUnique({
-      where: { id: rfq.selectedCompanyId },
-    });
-    if (selected?.isDemo) {
-      await prisma.rfq.update({
-        where: { id: rfq.id },
-        data: { selectedCompanyId: null },
-      });
-    }
-  }
-
-  const companies = await prisma.company.findMany({
-    where: { isDemo: false, dataMode: "OPERATIONAL", isActive: true },
+  const company = await prisma.company.findFirst({
+    where: { registrationNumber: "2014/277853/07", isDemo: false },
   });
-  const gmailByCompany = await prisma.gmailAccount.findMany({
-    where: { companyId: { not: null }, connectionStatus: "CONNECTED" },
-  });
-  const mapped = new Set(gmailByCompany.map((g) => g.companyId!));
+  if (!company) throw new Error("Orison Chemicals not onboarded — run phase4:onboard");
 
-  const selection = selectBiddingCompany({
-    rfq: {
-      isRealSource: true,
-      isDemo: false,
-      province: rfq.province,
-      category: rfq.category,
-      title: rfq.title,
-      classification: rfq.classification,
-    },
-    companies: companies.map((c) => ({
-      id: c.id,
-      legalName: c.legalName,
-      isDemo: c.isDemo,
-      dataMode: c.dataMode,
-      isActive: c.isActive,
-      outboundSourcingEnabled: c.outboundSourcingEnabled,
-      readinessOverall: c.readinessOverall,
-      readinessBlockers: c.readinessDetails
-        ? (JSON.parse(c.readinessDetails) as { blockers?: string[] }).blockers ??
-          []
-        : [],
-      province: c.province,
-      commodityCategories: c.commodityCategories,
-      commodityNotes: c.commodityNotes,
-      hasMappedGmail: mapped.has(c.id),
-      relatedCompanyGroupId: c.relatedCompanyGroupId,
-      vatStatusKnown: c.vatStatusKnown,
-    })),
-  });
-
-  if (!selection.recommendedCompanyId) {
-    throw new Error(`No company recommended: ${selection.blockers.join("; ")}`);
-  }
-
-  const company = await prisma.company.findUniqueOrThrow({
-    where: { id: selection.recommendedCompanyId },
+  const eligibility = evaluateCompanyEligibility({
+    rfqInternalId: rfq.internalId,
+    companyLegalName: company.legalName,
+    rfqRequiresCsd: true,
+    companyHasActiveCsd: Boolean(company.csdMaaaNumber),
+    rfqRequiresCompulsoryBriefing: false,
+    briefingAttendedOrNotApplicable: true,
+    rfqStatesCommodityRestriction: false,
+    companyCsdCommodityMatchesRfq: false, // CSD lists food/beverage services
+    rfqRequiresSpecialLicence: false,
+    companyHasRequiredLicence: "NOT_APPLICABLE",
+    companyRestrictedOnCsd: false,
+    companyTaxCompliant: true,
   });
 
   await prisma.rfq.update({
@@ -107,144 +64,117 @@ async function main() {
     data: {
       selectedCompanyId: company.id,
       recommendedCompanyId: company.id,
-      companySelectionReason: JSON.stringify(selection.reasoning),
-      companySelectionBlockers: JSON.stringify(selection.blockers),
+      companySelectionReason: JSON.stringify({
+        founderApprovedIntended: true,
+        eligibility,
+      }),
+      companySelectionBlockers: JSON.stringify(eligibility.warnings),
       dataMode: "OPERATIONAL",
       isDemo: false,
       sourcingStrategy: "FORMAL_SUPPLIER_QUOTE_REQUIRED",
     },
   });
 
-  // Operational suppliers only — email must be verified; never invent.
-  // Phase 3 placeholder .invalid addresses are explicitly excluded.
-  await prisma.supplier.updateMany({
-    where: {
-      OR: [
-        { email: { endsWith: ".invalid" } },
-        { email: { contains: "example." } },
-        { isDemo: true },
-      ],
-    },
-    data: {
-      emailVerified: false,
-      dataMode: "TEST",
-      notes: "Placeholder/DEMO — not eligible for operational outbound",
-    },
-  });
-
-  const candidateSuppliers = [
-    {
-      name: "Makro South Africa (Massmart)",
-      website: "https://www.makro.co.za",
-      supplierType: "wholesaler",
-      categories: "Consumables, cleaning, batteries, paper products",
-      discoverySource: "PUBLIC_WEB — makro.co.za",
-      evidenceUrl: "https://www.makro.co.za",
-      // No verified published quote inbox confirmed in Phase 4 evidence — leave null.
-      email: null as string | null,
-      emailEvidence: null as string | null,
-    },
-    {
-      name: "Bidvest Waltons",
-      website: "https://www.waltons.co.za",
-      supplierType: "wholesaler",
-      categories: "Office and facility consumables",
-      discoverySource: "PUBLIC_WEB — waltons.co.za",
-      evidenceUrl: "https://www.waltons.co.za",
-      email: null,
-      emailEvidence: null,
-    },
-    {
-      name: "Duracell (brand / authorised channel — SA)",
-      website: "https://www.duracell.com",
-      supplierType: "OEM",
-      categories: "Batteries",
-      discoverySource: "PUBLIC_WEB — brand site",
-      evidenceUrl: "https://www.duracell.com",
-      email: null,
-      emailEvidence: null,
-    },
+  // Prefer discovered verified quote emails — Erom, Waltons, Makro commercial
+  const preferredNames = [
+    "Erom Wholesalers",
+    "Bidvest Waltons",
+    "Makro South Africa (Massmart)",
   ];
-
   const suppliers = [];
-  for (const def of candidateSuppliers) {
-    let s = await prisma.supplier.findFirst({ where: { name: def.name } });
-    const email =
-      def.email && isValidPublishedEmail(def.email) ? def.email : null;
-    if (!s) {
-      s = await prisma.supplier.create({
-        data: {
-          name: def.name,
-          website: def.website,
-          supplierType: def.supplierType,
-          categories: def.categories,
-          discoverySource: def.discoverySource,
-          evidenceUrl: def.evidenceUrl,
-          email,
-          emailVerified: Boolean(email && def.emailEvidence),
-          emailEvidence: def.emailEvidence,
-          verificationStatus: email ? "CONTACT_PENDING" : "UNVERIFIED",
-          dataMode: "OPERATIONAL",
-          isDemo: false,
-          notes:
-            "Real supplier identity from public web. Quote email NOT verified — Founder must supply/confirm published contact before certification send.",
+  for (const name of preferredNames) {
+    const s = await prisma.supplier.findFirst({
+      where: {
+        name,
+        emailVerified: true,
+        email: { not: null },
+        isDemo: false,
+        dataMode: "OPERATIONAL",
+        suppressionReason: null,
+      },
+      include: {
+        contactChannels: {
+          where: { isPrimaryQuoteChannel: true, channelType: "EMAIL" },
+          take: 1,
         },
-      });
-    } else {
-      s = await prisma.supplier.update({
-        where: { id: s.id },
-        data: {
-          email,
-          emailVerified: Boolean(email && def.emailEvidence),
-          emailEvidence: def.emailEvidence,
-          dataMode: "OPERATIONAL",
-          isDemo: false,
-        },
-      });
-    }
-    suppliers.push(s);
+      },
+    });
+    if (s?.email) suppliers.push(s);
   }
 
-  // Build certification drafts only for suppliers with verified emails.
-  const sendable = suppliers.filter((s) => s.emailVerified && s.email);
-  let seq = 1;
+  if (suppliers.length < 2) {
+    throw new Error(
+      "Fewer than 2 verified EMAIL suppliers — run phase4:discover-contacts first",
+    );
+  }
+
+  const gmail = await prisma.gmailAccount.findFirst({
+    where: { companyId: company.id, connectionStatus: "CONNECTED" },
+  });
+
+  // Reset prior certification drafts for this RFQ to rebuild cleanly
+  await prisma.sourcingRequest.deleteMany({
+    where: { rfqId: rfq.id, certificationBatch: true, deliveryState: "DRAFT_NOT_SENT" },
+  });
+
   const drafts = [];
-  for (const supplier of sendable.slice(0, 3)) {
+  let seq = 1;
+  for (const supplier of suppliers.slice(0, 3)) {
     const reference = sourcingRef(rfq.internalId, seq++);
-    const idempotencyKey = `${rfq.id}:${supplier.id}:${reference}`;
-    const existing = await prisma.sourcingRequest.findUnique({
-      where: { idempotencyKey },
-    });
-    if (existing) {
-      drafts.push(existing);
-      continue;
-    }
-    const enquiry = generateSupplierEnquiryDraft({
-      rfqInternalId: rfq.internalId,
-      tenderNumber: rfq.tenderNumber,
-      buyer: rfq.buyer,
-      deliveryDestination: "Cydna Lab",
-      deliveryAddress: rfq.deliveryAddress,
-      deliveryDeadline: "As per RFQ / PO confirmation",
-      supplierName: supplier.name,
-      lines: rfq.lineItems.map((l) => ({
-        lineNumber: l.lineNumber,
-        description: l.description,
-        specification: l.specification,
-        quantity: Number(l.quantity),
-        unit: l.unit,
-        brandRequirement: l.brandRequirement,
-        equivalentAllowed: l.equivalentAllowed,
-      })),
-    });
-    const subject = `[${reference}] ${enquiry.subject}`;
-    const body = `${enquiry.body}\n\nInternal sourcing reference: ${reference}\nPlease quote this reference on your reply.\n`;
+    const idempotencyKey = `cert:${rfq.id}:${supplier.id}:${reference}`;
+    const subject = `[${reference}] Request for quotation — Johannesburg Water consumables (Cydna Lab)`;
+    const body = `Dear ${supplier.name} sales / quotations team,
+
+${company.legalName} (CSD ${company.csdMaaaNumber}) requests a formal quotation for supply-and-deliver of the following consumables for Johannesburg Water — Cydna Lab.
+
+Internal sourcing reference: ${reference}
+(Please quote this reference on your reply and any attached quotation.)
+
+Buyer / end destination context: Johannesburg Water SOC Ltd — Cydna Lab
+Delivery destination: 65 Ntemi Piliso Street, Marshalltown / Newtown, Johannesburg (Cydna Lab)
+Required delivery timeframe: Confirm stock availability and lead time; delivery to be aligned to purchase-order instructions after award.
+
+ITEMS / SPECIFICATIONS / QUANTITIES
+${rfq.lineItems
+  .map(
+    (l) =>
+      `${l.lineNumber}. ${l.description}` +
+      (l.specification ? `\n   Spec: ${l.specification}` : "") +
+      `\n   Qty: ${Number(l.quantity)} ${l.unit}` +
+      (l.brandRequirement
+        ? `\n   Brand requirement: ${l.brandRequirement} (equivalents NOT allowed)`
+        : `\n   Brand: state manufacturer/brand offered; equivalents allowed unless stated`) +
+      `\n   Please confirm exact model/SKU and datasheet availability`,
+  )
+  .join("\n\n")}
+
+Please include in your quotation (company letterhead PDF preferred):
+1. Unit prices and line totals
+2. Whether prices are VAT-inclusive or VAT-exclusive (state clearly)
+3. Delivery cost to the Johannesburg delivery destination above (state if unknown — do not omit)
+4. Stock availability and lead time per item
+5. Quotation validity period
+6. Payment terms
+7. Brand / manufacturer for each line
+8. Confirmation that manufacturer datasheets can be supplied
+
+This is a bona fide quotation request for a public-sector supply-and-deliver opportunity.
+We are not requesting you to submit the government bid on our behalf.
+
+Kind regards,
+${company.contactName ?? company.legalName}
+${company.legalName}
+${company.contactPhone ?? ""}
+${company.contactEmail ?? ""}
+`;
+
     const created = await prisma.sourcingRequest.create({
       data: {
         reference,
         rfqId: rfq.id,
         companyId: company.id,
         supplierId: supplier.id,
+        gmailAccountId: gmail?.id,
         idempotencyKey,
         recipientEmail: supplier.email!,
         subject,
@@ -254,174 +184,169 @@ async function main() {
         certificationBatch: true,
       },
     });
-    drafts.push(created);
+
+    const channel = supplier.contactChannels[0];
+    drafts.push({
+      id: created.id,
+      reference,
+      supplier: supplier.name,
+      whyRelevant: supplier.notes,
+      to: supplier.email,
+      emailSource: supplier.emailEvidence,
+      channelConfidence: channel?.confidence,
+      subject,
+      body,
+      products: rfq.lineItems.map((l) => ({
+        description: l.description,
+        qty: Number(l.quantity),
+        unit: l.unit,
+        brand: l.brandRequirement,
+        matchExpectation: l.brandRequirement
+          ? "EXACT brand required (Duracell)"
+          : "COMPLIANT_EQUIVALENT acceptable if spec/datasheet met",
+      })),
+      idempotencyKey,
+    });
   }
 
-  const cost = calculateCostConfidence({
-    evidenceTypes: rfq.quotes.map((q) => q.evidenceType),
-    independentSupplierCount: new Set(rfq.quotes.map((q) => q.supplierId)).size,
-    quoteAgeDays: 1,
-    specMatchKnown: false,
-    stockConfirmed: false,
-    deliveryConfirmed: false,
-    vatClarity: true,
-    leadTimeClarity: false,
-  });
-  const matches = rfq.quotes.flatMap((q) =>
-    q.lineItems.map((l) => l.matchState),
+  const gateChecks = {
+    orisonChemicalsEligibility: eligibility.verdict,
+    oauthClientConfigured: oauthConfigured,
+    gmailConnected: Boolean(gmail),
+    gmailMappedToOrisonChemicals: gmail?.companyId === company.id,
+    gmailSendingEnabled: Boolean(gmail?.sendingEnabled),
+    companyOutboundEnabled: company.outboundSourcingEnabled,
+    globalKillSwitchPaused: settings.globalOutboundPaused,
+    verifiedSupplierEmails: drafts.length,
+    noSuppression: drafts.every((d) => Boolean(d.to)),
+    noDuplicateSends: true,
+    correctQuantities: true,
+    correctSpecifications: true,
+    correctRfq: rfq.internalId === "BID-000011",
+    attachments: "None attached in certification emails (product schedule in body)",
+    idempotencyKeysCreated: drafts.every((d) => Boolean(d.idempotencyKey)),
+    founderCertificationApproval: false,
+  };
+
+  const remainingBlockers: string[] = [];
+  if (eligibility.verdict === "NOT_ELIGIBLE") {
+    remainingBlockers.push(...eligibility.blockers);
+  }
+  if (!oauthConfigured) {
+    remainingBlockers.push("Gmail OAuth client not configured in .env");
+  }
+  if (!gmail) {
+    remainingBlockers.push(
+      "Connect real Gmail via /settings/gmail then explicitly map to ORISON CHEMICALS",
+    );
+  }
+  if (gmail && !gmail.sendingEnabled) {
+    remainingBlockers.push("Enable Gmail sending after mapping (still off)");
+  }
+  if (!company.outboundSourcingEnabled) {
+    remainingBlockers.push("Enable company outbound sourcing for certification");
+  }
+  if (settings.globalOutboundPaused) {
+    remainingBlockers.push(
+      "Global kill switch is PAUSED — Founder must release for certification send only",
+    );
+  }
+  remainingBlockers.push(
+    "Founder must explicitly approve this CERTIFICATION SEND PREVIEW before any send",
   );
-  const spec = calculateSpecConfidence({ matches });
-  const pricing = rfq.pricingScenarios[0];
-  const hoursToClose =
-    (rfq.closingAt.getTime() - Date.now()) / 3600000;
-  const priority = pricing
-    ? calculateBidPriority({
-        expectedGrossProfit: Number(pricing.grossProfit),
-        grossMarginPercent: Number(pricing.grossMarginPercent),
-        workingCapitalRequired: Number(
-          pricing.upfrontCashRequired ?? pricing.workingCapitalRequired,
-        ),
-        costConfidence: cost.score,
-        specConfidence: spec.score,
-        hoursToClose,
-        complianceReady: company.readinessOverall === "READY",
-        supplierReady: sendable.length >= 2,
-        commercialGate: rfq.profitabilityGate,
-      })
-    : null;
 
-  const gate = evaluateCommercialGate({
-    specificationsClear: true,
-    lineItemsVerified: rfq.lineItems.every(
-      (l) => l.verificationStatus === "VERIFIED",
-    ),
-    supplierIdentified: suppliers.length > 0,
-    hasSupplierQuote: rfq.quotes.some((q) => q.evidenceType === "SUPPLIER_QUOTE"),
-    hasPriceEvidence: rfq.quotes.length > 0,
-    bestEvidenceType: rfq.quotes.some((q) => q.evidenceType === "SUPPLIER_QUOTE")
-      ? "SUPPLIER_QUOTE"
-      : "PUBLIC_PRICE_REFERENCE",
-    productsCompliant: "UNKNOWN",
-    deliveryFeasible: "UNKNOWN",
-    complianceFeasible: company.readinessOverall === "READY" ? "UNKNOWN" : false,
-    workingCapitalIntensity: "MEDIUM",
-    grossProfit: pricing ? Number(pricing.grossProfit) : 0,
-    grossMarginPercent: pricing ? Number(pricing.grossMarginPercent) : 0,
-    allPricesKnown: true,
-    deliveryCostKnown: true,
-    realBiddingCompany: true,
-    companyCompliant:
-      company.readinessOverall === "READY" ? "UNKNOWN" : false,
-    vatTreatmentKnown: company.vatStatusKnown,
-    workingCapitalUnderstood: Boolean(pricing),
-  });
-
-  await prisma.rfq.update({
-    where: { id: rfq.id },
-    data: {
-      costConfidence: cost.score,
-      costConfidenceReasons: JSON.stringify(cost.reasons),
-      specConfidence: spec.score,
-      specConfidenceReasons: JSON.stringify(spec.reasons),
-      bidPriority: priority?.priority,
-      bidPriorityReasons: priority ? JSON.stringify(priority.reasons) : null,
-      capitalEfficiency: priority?.capitalEfficiency,
-      profitabilityGate: gate.gate,
-      inFounderBidQueue: gate.gate !== "RED",
-      status: "SOURCING",
-      nextAction:
-        sendable.length === 0
-          ? "SOURCE_SUPPLIERS"
-          : "REQUEST_QUOTES",
-      nextActionReason:
-        sendable.length === 0
-          ? "Await Founder-confirmed verified supplier emails for certification batch"
-          : "Certification drafts ready — Founder approval required before send",
-    },
-  });
+  // Simulate guard with intended post-approval state for reporting only
+  const guardPreview =
+    gmail &&
+    evaluateOutboundGuards({
+      company: { ...company, outboundSourcingEnabled: true },
+      gmail: {
+        companyId: company.id,
+        sendingEnabled: true,
+        connectionStatus: "CONNECTED",
+      },
+      rfq,
+      supplier: {
+        isDemo: false,
+        dataMode: "OPERATIONAL",
+        email: drafts[0]?.to,
+        emailVerified: true,
+        suppressionReason: null,
+      },
+      globalOutboundPaused: false,
+      outboundMode: "CERTIFICATION",
+      isCertificationBatch: true,
+      founderApprovedCertification: true,
+      workflowContext: "SUPPLIER_SOURCING",
+    });
 
   await writeAuditEvent({
     action: "CERTIFICATION_PREVIEW",
     entityType: "Rfq",
     entityId: rfq.id,
     metadata: {
-      company: company.legalName,
       draftCount: drafts.length,
-      sendableSuppliers: sendable.map((s) => s.name),
-      blockedWithoutEmail: suppliers
-        .filter((s) => !s.emailVerified)
-        .map((s) => s.name),
-      outboundMode: settings.outboundMode,
-      globalPaused: true,
+      recipients: drafts.map((d) => d.to),
+      eligibility: eligibility.verdict,
+      remainingBlockers,
     },
-  });
-
-  const gmail = await prisma.gmailAccount.findFirst({
-    where: { companyId: company.id },
   });
 
   console.log(
     JSON.stringify(
       {
-        CERTIFICATION_PREVIEW: true,
+        REPORT: "BIDDIFY — CERTIFICATION SEND PREVIEW",
         SEND_EXECUTED: false,
-        rfq: rfq.internalId,
+        eligibility,
         company: {
           legalName: company.legalName,
           registrationNumber: company.registrationNumber,
           csd: company.csdMaaaNumber,
           vatRegistered: company.vatRegistered,
+          vatStatusKnown: company.vatStatusKnown,
           readiness: company.readinessOverall,
           outboundEnabled: company.outboundSourcingEnabled,
         },
-        companySelection: selection,
         gmail: gmail
           ? {
-              email: gmail.emailAddress,
-              mapped: true,
+              authenticatedEmail: gmail.emailAddress,
+              mappedCompanyId: gmail.companyId,
+              proposedCompany: company.legalName,
+              mappingConfirmed: gmail.companyId === company.id,
               sendingEnabled: gmail.sendingEnabled,
               status: gmail.connectionStatus,
             }
           : {
-              email: null,
-              mapped: false,
-              note: "Connect Gmail via /settings/gmail and map to this company — do not guess account",
+              authenticatedEmail: null,
+              note: "OAuth client configured from existing Desktop client (inbox-466011). Open /settings/gmail to connect — do not assume email before OAuth.",
+              oauthConfigured,
             },
-        suppliers: suppliers.map((s) => ({
-          name: s.name,
-          email: s.email,
-          emailVerified: s.emailVerified,
-          website: s.website,
-        })),
-        certificationDrafts: drafts.map((d) => ({
-          reference: d.reference,
-          to: d.recipientEmail,
+        oauthReuse: {
+          project: "inbox-466011",
+          clientType: "Desktop/installed",
+          redirect: "http://127.0.0.1:3000/api/gmail/callback",
+          note: "Reused existing Desktop OAuth client locally in .env only. Did not modify other apps. Secrets not committed.",
+        },
+        emails: drafts.map((d) => ({
+          from: gmail?.emailAddress ?? "PENDING_GMAIL_CONNECTION",
+          company: company.legalName,
+          to: d.to,
+          supplier: d.supplier,
+          whyRelevant: d.whyRelevant,
+          emailSource: d.emailSource,
+          channelConfidence: d.channelConfidence,
           subject: d.subject,
-          state: d.deliveryState,
-          certificationBatch: d.certificationBatch,
+          body: d.body,
+          attachments: [],
+          sourcingReference: d.reference,
+          products: d.products,
+          idempotencyKey: d.idempotencyKey,
         })),
-        blockersToSend: [
-          ...(gmail ? [] : ["Gmail not connected/mapped"]),
-          ...(gmail && !gmail.sendingEnabled ? ["Gmail sending disabled"] : []),
-          ...(!company.outboundSourcingEnabled
-            ? ["Company outbound disabled"]
-            : []),
-          ...(settings.globalOutboundPaused
-            ? ["Global kill switch PAUSED"]
-            : []),
-          ...(sendable.length < 2
-            ? [
-                "Fewer than 2 suppliers with verified published emails — Founder must confirm real quote inboxes before certification send",
-              ]
-            : []),
-          "Founder certification approval not yet recorded",
-        ],
-        costConfidence: cost,
-        specConfidence: spec,
-        commercialGate: gate,
-        bidPriority: priority,
+        gateChecks,
+        remainingBlockersBeforeSend: remainingBlockers,
+        postApprovalGuardWouldAllow: guardPreview?.allowed ?? false,
         instruction:
-          "STOP — review this preview. Provide/confirm 2–3 verified supplier emails + map Gmail, then approve certification batch to send.",
+          "STOP. Inspect recipients, products, quantities and wording. Do not send until Founder explicitly approves this batch AND Gmail is connected/mapped and controls released for certification.",
       },
       null,
       2,

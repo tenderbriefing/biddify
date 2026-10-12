@@ -286,6 +286,21 @@ enum SupplierSuppressionReason {
   TEMPORARY_HOLD
 }
 
+enum ContactChannelType {
+  EMAIL
+  WEB_QUOTE_FORM
+  WEB_CONTACT_FORM
+  PHONE
+  OTHER_VERIFIED_CHANNEL
+}
+
+enum ContactConfidence {
+  HIGH
+  MEDIUM
+  LOW
+  UNVERIFIED
+}
+
 enum ReadinessState {
   READY
   ACTION_REQUIRED
@@ -427,6 +442,7 @@ model Supplier {
   updatedAt           DateTime @updatedAt
 
   contacts  SupplierContact[]
+  contactChannels SupplierContactChannel[]
   quotes    SupplierQuote[]
   enquiries SupplierEnquiry[]
   emails    EmailMessage[]
@@ -435,6 +451,30 @@ model Supplier {
 
   @@index([isDemo])
   @@index([email])
+}
+
+model SupplierContactChannel {
+  id              String             @id @default(cuid())
+  supplierId      String
+  channelType     ContactChannelType
+  email           String?
+  phone           String?
+  url             String?
+  sourceUrl       String
+  sourceType      String
+  purpose         String?
+  confidence      ContactConfidence  @default(UNVERIFIED)
+  verifiedAt      DateTime?
+  evidenceNotes   String?
+  isPrimaryQuoteChannel Boolean      @default(false)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  @@index([supplierId])
+  @@index([email])
+  @@index([channelType])
 }
 
 model SupplierContact {
