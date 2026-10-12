@@ -47,6 +47,11 @@ export type GuardrailInput = {
   commercialIntegrityFailures?: string[];
   livePricingCredible?: boolean;
   unexplainedExtremeVariance?: boolean;
+  /** Procurement Optimizer V1 */
+  procurementOptimized?: boolean;
+  stockSufficient?: boolean;
+  supplierCredibilityAcceptable?: boolean;
+  extremeVarianceResolved?: boolean;
 };
 
 export type GuardrailResult = {
@@ -214,6 +219,19 @@ export function classifyAutonomousOutcome(
     reasons.push(
       `Commercial integrity gate failed: ${(input.commercialIntegrityFailures ?? []).join("; ") || "see audit"}`,
     );
+  }
+
+  if (input.procurementOptimized === false) {
+    reasons.push("Procurement optimizer did not produce a defensible strategy");
+  }
+  if (input.stockSufficient === false) {
+    reasons.push("Stock evidence insufficient for autonomous procurement");
+  }
+  if (input.supplierCredibilityAcceptable === false) {
+    reasons.push("Supplier credibility not acceptable for autonomous selection");
+  }
+  if (input.extremeVarianceResolved === false) {
+    reasons.push("Extreme price variance unresolved after second-source investigation");
   }
 
   if (reasons.length > 0) {

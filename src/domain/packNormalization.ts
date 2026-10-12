@@ -88,6 +88,8 @@ export function normalizePackPurchase(
 export function parsePackSize(text: string): number | null {
   const m =
     text.match(/\bpack\s+of\s+(\d+)\b/i) ||
+    text.match(/\b(?:blister\s*)?pack\s*(\d+)\b/i) ||
+    text.match(/\bcard\s+(\d+)\b/i) ||
     text.match(/\b(\d+)\s*[x×]\s*pack\b/i) ||
     text.match(/\b(\d+)\s*[- ]?pack\b/i) ||
     text.match(/\b(\d+)\s*per\s*pack\b/i);

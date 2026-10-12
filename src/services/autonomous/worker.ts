@@ -40,7 +40,7 @@ import {
 import { classifyAutonomousOutcome } from "@/domain/autonomousOutcome";
 import { evaluateCompanyEligibility } from "@/domain/companyEligibility";
 import { calculatePricing } from "@/domain/pricing";
-import { toNumber } from "@/domain/money";
+import { roundMoney, toNumber } from "@/domain/money";
 import { LiveWebResearchProvider } from "@/services/research/liveWebProvider";
 import type { LiveResearchEvent } from "@/services/research/liveWebProvider";
 import { validateMultiSourcePrices } from "@/domain/multiSourcePricing";
@@ -76,7 +76,17 @@ import {
 import { evaluateCommercialIntegrity } from "@/domain/commercialIntegrity";
 import { selectProcurementCost } from "@/domain/procurementCostStrategy";
 import type { QuantityReconciliation } from "@/domain/quantityReconciliation";
-
+import {
+  aggregateOptimizerMetrics,
+  optimizeLineProcurement,
+  type LineOptimizerResult,
+} from "@/domain/procurementOptimizer";
+import {
+  investigateExtremeVariance,
+  reclassifyVarianceAfterInvestigation,
+  varianceSecondSourceQueries,
+} from "@/domain/varianceInvestigation";
+import type { VarianceEvidenceSignal } from "@/domain/varianceInvestigation";
 export type ProcessResult = {
   rfqId: string;
   internalId: string;
@@ -118,6 +128,9 @@ type RunArtifacts = {
   costWaterfall?: unknown;
   priceVariance?: unknown;
   integrityMetrics?: unknown;
+  procurementOptimizer?: unknown;
+  varianceInvestigation?: unknown;
+  optimizerMetrics?: unknown;
 };
 
 async function transition(
@@ -582,11 +595,109 @@ export async function processClaimedRfq(
         ];
       }
 
+      // Procurement Optimizer: second-pass research when below target candidates
+      // or battery lines needing explicit pack evidence (never infer pack size).
+      const needsMore =
+        RESEARCH_POLICY.optimizer.enabled &&
+        (/battery|aaa|aa\b/i.test(line.description) ||
+          candidates.filter((c) => c.priceKnown).length <
+            RESEARCH_POLICY.budget.minCandidatesTargetPerLine);
+
+      if (needsMore && preferLiveWeb) {
+        await writeAuditEvent(
+          {
+            action: "PROCUREMENT_RESEARCH_STARTED",
+            entityType: "Rfq",
+            entityId: rfq.id,
+            metadata: {
+              lineNumber: line.lineNumber,
+              reason: "second-pass for pack/multi-candidate discovery",
+            },
+          },
+          prisma,
+        );
+        try {
+          const isBattery = /battery|aaa|\baa\b/i.test(line.description);
+          const size = /\baaa\b/i.test(line.description)
+            ? "AAA"
+            : /\baa\b/i.test(line.description)
+              ? "AA"
+              : "";
+          const brand = line.brandRequirement ?? (isBattery ? "Duracell" : "");
+          const shortQueries = isBattery
+            ? [
+                `${brand} ${size} pack of 4`.trim(),
+                `${brand} ${size} pack of 8`.trim(),
+                `${brand} ${size} pack of 10`.trim(),
+                `${brand} ${size} alkaline battery pack`.trim(),
+                `Energizer ${size} pack`.trim(),
+              ].filter((q) => q.length > 3)
+            : varianceSecondSourceQueries({
+                description: line.description,
+                brand: line.brandRequirement,
+                suspectedPack: true,
+              });
+
+          const extra = await liveProvider.catalogueQuickSearch(
+            line.lineNumber,
+            shortQueries.slice(
+              0,
+              RESEARCH_POLICY.budget.maxSecondSourceVarianceSearches + 1,
+            ),
+          );
+          const seen = new Set(
+            candidates
+              .map((c) => c.productUrl?.split("?")[0]?.toLowerCase())
+              .filter(Boolean),
+          );
+          for (const c of extra) {
+            const key = c.productUrl?.split("?")[0]?.toLowerCase();
+            if (key && seen.has(key)) continue;
+            if (key) seen.add(key);
+            // Battery chemistry/size gate — reject wrong cell size
+            if (isBattery && size) {
+              const title = c.productName.toLowerCase();
+              if (size === "AAA" && !/\baaa\b/.test(title)) continue;
+              if (size === "AA" && (!/\baa\b/.test(title) || /\baaa\b/.test(title)))
+                continue;
+            }
+            candidates.push({
+              ...c,
+              rawEvidence: {
+                ...c.rawEvidence,
+                secondSource: true,
+              },
+            });
+            await writeAuditEvent(
+              {
+                action: "PROCUREMENT_CANDIDATE_FOUND",
+                entityType: "Rfq",
+                entityId: rfq.id,
+                metadata: {
+                  lineNumber: line.lineNumber,
+                  product: c.productName,
+                  price: c.price,
+                  packSize: c.packSize,
+                },
+              },
+              prisma,
+            );
+          }
+        } catch (err) {
+          reasons.push(
+            `Line ${line.lineNumber}: second-pass research isolated — ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
       researchByLine[line.lineNumber] = {
         candidates,
         lineItemId: lineItem.id,
-        liveCount,
+        liveCount: candidates.filter((c) => c.priceKnown).length,
       };
+      if (researchByLine[line.lineNumber].liveCount > 0 && liveCount === 0) {
+        linesWithLivePricing += 1;
+      }
     }
 
     // Persist granular research observations (dedupe by unique key)
@@ -746,6 +857,7 @@ export async function processClaimedRfq(
       typeof evaluateCommercialIntegrity
     >[0]["lines"] = [];
     const reconciliations: QuantityReconciliation[] = [];
+    const optimizerResults: LineOptimizerResult[] = [];
     let totalProductCost = 0;
     let anyDeliveryKnown = false;
     let deliveryTotal = 0;
@@ -755,6 +867,7 @@ export async function processClaimedRfq(
     let vatAcceptable = true;
     let deliveryV2Blocks = false;
     let deliveryV2Summary: ReturnType<typeof classifyDeliveryV2> | null = null;
+    let potentialSavings = 0;
 
     for (const line of normalized) {
       const { candidates, lineItemId } = researchByLine[line.lineNumber];
@@ -944,27 +1057,166 @@ export async function processClaimedRfq(
           sourceCredibility: s.sourceCredibility,
         })),
       );
+
+      // —— PROCUREMENT OPTIMIZER V1 ——
+      const optResult = optimizeLineProcurement({
+        lineNumber: line.lineNumber,
+        description: line.originalWording,
+        tenderQuantity: line.quantity,
+        tenderUnit: line.unit,
+        brandRequirement: line.brandRequirement,
+        modelRequirement: line.modelRequirement,
+        equivalentAllowed: line.equivalentAllowed,
+        technicalSpecifications: line.technicalSpecifications,
+        candidates: scoredInputs.map((s) => ({
+          id: s.id,
+          supplier: s._candidate.sourceName,
+          sourceUrl: s._candidate.productUrl,
+          sourceType: s._candidate.sourceType,
+          productTitle: s._candidate.productName,
+          brand: s._candidate.brand,
+          sku: s._candidate.modelSku,
+          productDescription: String(s._candidate.rawEvidence?.description ?? ""),
+          displayedPrice: s._candidate.price,
+          priceKnown: s._candidate.priceKnown,
+          vatTreatment: s._candidate.vatTreatment,
+          packSize: s._candidate.packSize,
+          availability: s._candidate.availability,
+          delivery: (s._candidate.rawEvidence?.delivery ?? null) as
+            | import("@/domain/deliveryEvidence").DeliveryEvidence
+            | null,
+          sourceQuality: s.sourceCredibility,
+          retrievedAt: s._candidate.retrievedAt,
+        })),
+        splitAllowed: RESEARCH_POLICY.optimizer.allowSplitSupplier,
+      });
+      optimizerResults.push(optResult);
+      if (optResult.strategy.savingsVsFirstValid != null) {
+        potentialSavings += Math.max(0, optResult.strategy.savingsVsFirstValid);
+      }
+
+      await writeAuditEvent(
+        {
+          action: "PROCUREMENT_STRATEGY_OPTIMIZED",
+          entityType: "Rfq",
+          entityId: rfq.id,
+          metadata: {
+            lineNumber: line.lineNumber,
+            type: optResult.strategy.type,
+            totalLanded: optResult.strategy.totalLandedCost,
+            usable: optResult.metrics.commerciallyUsable,
+          },
+        },
+        prisma,
+      );
+      if (optResult.strategy.type === "SPLIT_SUPPLIER") {
+        await writeAuditEvent(
+          {
+            action: "PROCUREMENT_SPLIT_SELECTED",
+            entityType: "Rfq",
+            entityId: rfq.id,
+            metadata: {
+              lineNumber: line.lineNumber,
+              allocations: optResult.strategy.allocations,
+            },
+          },
+          prisma,
+        );
+      } else if (optResult.recommendedCandidateId) {
+        await writeAuditEvent(
+          {
+            action: "PROCUREMENT_WINNER_SELECTED",
+            entityType: "Rfq",
+            entityId: rfq.id,
+            metadata: {
+              lineNumber: line.lineNumber,
+              winnerId: optResult.recommendedCandidateId,
+              reason: optResult.winnerReason,
+            },
+          },
+          prisma,
+        );
+      } else {
+        await writeAuditEvent(
+          {
+            action: "PROCUREMENT_OPTIMIZATION_BLOCKED",
+            entityType: "Rfq",
+            entityId: rfq.id,
+            metadata: {
+              lineNumber: line.lineNumber,
+              type: optResult.strategy.type,
+              blocked: optResult.strategy.blockedReasons,
+            },
+          },
+          prisma,
+        );
+      }
+
+      // Persist optimizer snapshot on each candidate row
+      for (const pc of optResult.candidates) {
+        try {
+          await prisma.productResearchCandidate.update({
+            where: { id: pc.id },
+            data: {
+              notes: JSON.stringify({
+                optimizer: {
+                  rank: optResult.ranked.find((r) => r.candidate.id === pc.id)
+                    ?.rank,
+                  spec: pc.specification.classification,
+                  stock: pc.stock.class,
+                  landed: pc.landedProcurementCost,
+                  integrityFirm: pc.commercialIntegrityFirm,
+                  flags: pc.integrityFlags,
+                },
+              }),
+            },
+          });
+        } catch {
+          /* candidate may be soft-only */
+        }
+      }
+
       selectionArtifacts.push({
         line: line.lineNumber,
         ...selection,
         multiSource: multi,
+        optimizer: {
+          strategy: optResult.strategy,
+          recommended: optResult.recommendedCandidateId,
+          reason: optResult.winnerReason,
+          metrics: optResult.metrics,
+        },
       });
 
       let selectedCandidate: ResearchCandidate | null = null;
+      // Prefer optimizer winner (lowest defensible landed among integrity-firm)
       let selectedId: string | null =
-        costPick.selectedId &&
-        mayAutoSelect(
-          scoredInputs.find((s) => s.id === costPick.selectedId)?.matchVerdict ??
+        optResult.strategy.type === "SPLIT_SUPPLIER"
+          ? optResult.strategy.allocations[0]?.candidateId ?? null
+          : optResult.recommendedCandidateId;
+
+      if (
+        !selectedId ||
+        !mayAutoSelect(
+          scoredInputs.find((s) => s.id === selectedId)?.matchVerdict ??
             "INSUFFICIENT_INFORMATION",
         )
-          ? costPick.selectedId
-          : multi.selectedId &&
-              mayAutoSelect(
-                scoredInputs.find((s) => s.id === multi.selectedId)
-                  ?.matchVerdict ?? "INSUFFICIENT_INFORMATION",
-              )
-            ? multi.selectedId
-            : selection.selectedId;
+      ) {
+        selectedId =
+          costPick.selectedId &&
+          mayAutoSelect(
+            scoredInputs.find((s) => s.id === costPick.selectedId)
+              ?.matchVerdict ?? "INSUFFICIENT_INFORMATION",
+          )
+            ? costPick.selectedId
+            : multi.selectedId &&
+                mayAutoSelect(
+                  scoredInputs.find((s) => s.id === multi.selectedId)
+                    ?.matchVerdict ?? "INSUFFICIENT_INFORMATION",
+                )
+              ? multi.selectedId
+              : selection.selectedId;
+      }
 
       if (!selectedId) {
         const soft = scoredInputs
@@ -1506,31 +1758,107 @@ export async function processClaimedRfq(
         ? capturedQuoteProduct
         : historicalProduct;
 
-    // Extreme variance is unexplained until Founder/forensic review assigns a code.
-    // Pack hypotheses are recorded as notes, not auto-accepted explanations.
-    const variance = classifyPriceVariance({
+    // Extreme variance triggers second-source investigation — never invent explanations.
+    let variance = classifyPriceVariance({
       oldCost: oldComparator,
       newCost: totalProductCost,
       explanationCode: null,
       explanationText:
         oldComparator != null
-          ? [
-              `Historical comparator R${oldComparator} vs live reconciled R${totalProductCost}`,
-              packAmbiguity
-                ? "Hypothesis: UNIT_OF_MEASURE_CORRECTION / pack ambiguity in live or historical"
-                : null,
-              reconciliations.some((r) => (r.supplierPackSize ?? 1) > 1)
-                ? "Hypothesis: DIFFERENT_PACK_QUANTITY"
-                : null,
-            ]
-              .filter(Boolean)
-              .join("; ")
+          ? `Historical comparator R${oldComparator} vs live reconciled R${totalProductCost}`
           : null,
     });
-    if (
-      variance.band === "EXTREME_VARIANCE" ||
-      variance.band === "HIGH_VARIANCE"
-    ) {
+
+    if (variance.band === "EXTREME_VARIANCE") {
+      await writeAuditEvent(
+        {
+          action: "PRICE_VARIANCE_DETECTED",
+          entityType: "Rfq",
+          entityId: rfq.id,
+          metadata: variance,
+        },
+        prisma,
+      );
+      await writeAuditEvent(
+        {
+          action: "VARIANCE_INVESTIGATION_STARTED",
+          entityType: "Rfq",
+          entityId: rfq.id,
+          metadata: { oldCost: oldComparator, newCost: totalProductCost },
+        },
+        prisma,
+      );
+
+      const signals: VarianceEvidenceSignal[] = [];
+      if (reconciliations.some((r) => (r.supplierPackSize ?? 1) > 1 && r.firm)) {
+        signals.push({
+          code: "DIFFERENT_PACK_QUANTITY",
+          evidence:
+            "Live firm candidates use explicit pack economics vs historical EACH assumption",
+          confidence: 0.8,
+        });
+      }
+      if (packAmbiguity) {
+        signals.push({
+          code: "UNIT_OF_MEASURE_CORRECTION",
+          evidence: "Pack/price basis ambiguity corrected by integrity gate",
+          confidence: 0.75,
+        });
+      }
+      // Stale historical public-ref when live firm lines diverge sharply
+      if (
+        oldComparator != null &&
+        totalProductCost > 0 &&
+        Math.abs(totalProductCost - oldComparator) / oldComparator > 0.75 &&
+        reconciliations.filter((r) => r.firm).length >= 2
+      ) {
+        signals.push({
+          code: "OLD_EVIDENCE_STALE",
+          evidence:
+            "Multiple firm live sources diverge >75% from historical public-ref",
+          confidence: 0.72,
+        });
+      }
+
+      const investigation = investigateExtremeVariance({
+        variance,
+        signals,
+        additionalSearches: optimizerResults.flatMap((o) =>
+          o.candidates
+            .filter((c) => c.sourceUrl)
+            .map((c) => c.sourceUrl!)
+            .slice(0, 2),
+        ),
+        additionalCandidateIds: optimizerResults.flatMap((o) =>
+          o.candidates.map((c) => c.id),
+        ),
+      });
+      artifacts.varianceInvestigation = investigation;
+      variance = reclassifyVarianceAfterInvestigation(variance, investigation);
+
+      await writeAuditEvent(
+        {
+          action: investigation.resolved
+            ? "VARIANCE_INVESTIGATION_RESOLVED"
+            : "VARIANCE_INVESTIGATION_FAILED",
+          entityType: "Rfq",
+          entityId: rfq.id,
+          metadata: investigation,
+        },
+        prisma,
+      );
+      if (investigation.resolved && investigation.explanation) {
+        await writeAuditEvent(
+          {
+            action: "PRICE_VARIANCE_EXPLAINED",
+            entityType: "Rfq",
+            entityId: rfq.id,
+            metadata: { explanation: investigation.explanation },
+          },
+          prisma,
+        );
+      }
+    } else if (variance.band === "HIGH_VARIANCE") {
       await writeAuditEvent(
         {
           action: "PRICE_VARIANCE_DETECTED",
@@ -1542,6 +1870,41 @@ export async function processClaimedRfq(
       );
     }
     artifacts.priceVariance = variance;
+
+    const optMetrics = aggregateOptimizerMetrics(optimizerResults);
+    artifacts.procurementOptimizer = optimizerResults.map((o) => ({
+      lineNumber: o.lineNumber,
+      strategy: o.strategy,
+      recommended: o.recommendedCandidateId,
+      reason: o.winnerReason,
+      metrics: o.metrics,
+      comparison: o.ranked.map((r) => ({
+        id: r.candidate.id,
+        supplier: r.candidate.supplier,
+        product: r.candidate.productTitle,
+        rank: r.rank,
+        landed: r.candidate.landedProcurementCost,
+        spec: r.candidate.specification.classification,
+        stock: r.candidate.stock.class,
+        firm: r.candidate.commercialIntegrityFirm,
+        disqualified: r.disqualified,
+      })),
+    }));
+    artifacts.optimizerMetrics = {
+      ...optMetrics,
+      potentialSavingsVsFirstValid: roundMoney(potentialSavings),
+      procurementSavingsIdentified: roundMoney(potentialSavings),
+      extremeVarianceInvestigations:
+        artifacts.varianceInvestigation != null ? 1 : 0,
+      varianceResolved: Boolean(
+        (artifacts.varianceInvestigation as { resolved?: boolean } | undefined)
+          ?.resolved,
+      ),
+      varianceUnresolved: Boolean(
+        artifacts.varianceInvestigation &&
+          !(artifacts.varianceInvestigation as { resolved?: boolean }).resolved,
+      ),
+    };
 
     // Recompute line sells with selected markup
     for (const pl of pricedLines) {
@@ -1766,6 +2129,31 @@ export async function processClaimedRfq(
     const sourcingConfidence = overallSourcingConfidence(lineScores);
     const confidenceMerged = Math.min(confidence, sourcingConfidence + 0.15);
 
+    const optAllOk = optimizerResults.every(
+      (o) =>
+        o.strategy.type === "SINGLE_SUPPLIER" ||
+        o.strategy.type === "SPLIT_SUPPLIER",
+    );
+    const stockOk = optimizerResults.every((o) => {
+      const winner =
+        o.recommendedCandidateId != null
+          ? o.candidates.find((c) => c.id === o.recommendedCandidateId)
+          : o.strategy.allocations[0]
+            ? o.candidates.find(
+                (c) => c.id === o.strategy.allocations[0].candidateId,
+              )
+            : null;
+      return !winner || winner.stock.class !== "OUT_OF_STOCK";
+    });
+    const credOk = optimizerResults.every((o) =>
+      o.candidates
+        .filter((c) =>
+          o.strategy.allocations.some((a) => a.candidateId === c.id) ||
+          c.id === o.recommendedCandidateId,
+        )
+        .every((c) => !c.integrityFlags.includes("CREDIBILITY_LOW_OR_UNKNOWN")),
+    );
+
     const guardrail = classifyAutonomousOutcome({
       eligibility: eligibilityVerdict,
       compulsoryBriefingMissed: briefingMissed,
@@ -1780,6 +2168,11 @@ export async function processClaimedRfq(
       commercialIntegrityFailures: integrity.failures,
       livePricingCredible: !evidenceWeak && qtyRate >= 0.5,
       unexplainedExtremeVariance: variance.blocksAutoQuoted,
+      procurementOptimized: optAllOk,
+      stockSufficient: stockOk,
+      supplierCredibilityAcceptable: credOk,
+      extremeVarianceResolved:
+        variance.band !== "EXTREME_VARIANCE" || !variance.blocksAutoQuoted,
     });
     artifacts.outcome = guardrail;
     artifacts.guardrails = guardrail;

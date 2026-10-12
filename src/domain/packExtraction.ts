@@ -18,7 +18,7 @@ export type PackExtraction = {
 };
 
 const PACK_OF =
-  /\b(?:pack(?:s)?\s+of|pk\s+of|×|x)\s*(\d+)\b|\b(\d+)\s*[x×]\s*(?:pack|pk)?\b|\b(\d+)\s*(?:-|\s)?pack\b|\b(\d+)\s*per\s*pack\b/i;
+  /\b(?:pack(?:s)?\s+of|pk\s+of|blister\s*pack|card|×|x)\s*(\d+)\b|\b(\d+)\s*[x×]\s*(?:pack|pk)?\b|\b(\d+)\s*(?:-|\s)?pack\b|\bpack\s*(\d+)\b|\b(\d+)\s*per\s*pack\b/i;
 
 export function extractPackSemantics(input: {
   productName: string;
@@ -44,7 +44,7 @@ export function extractPackSemantics(input: {
 
   const m = text.match(PACK_OF);
   const packSize = m
-    ? Number(m[1] || m[2] || m[3] || m[4])
+    ? Number(m[1] || m[2] || m[3] || m[4] || m[5])
     : null;
 
   if (packSize && Number.isFinite(packSize) && packSize > 1) {

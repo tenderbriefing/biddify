@@ -50,7 +50,7 @@ export const TERMINAL_AUTONOMOUS_STATES: ReadonlySet<AutonomousProcessingState> 
   ]);
 
 export const WORKER_VERSION =
-  "autonomous-rfq-engine-v1.2-commercial-integrity";
+  "autonomous-rfq-engine-v1.3-procurement-optimizer";
 
 /** Transient failures may retry; structural outcomes must not. */
 export const MAX_TRANSIENT_RETRIES = 2;

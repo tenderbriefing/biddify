@@ -285,6 +285,24 @@ export default async function AutonomousOpsDashboardPage() {
     pass: 0,
     n: 0,
   };
+  const optAgg = {
+    n: 0,
+    lines: 0,
+    candidates: 0,
+    lines3: 0,
+    exact: 0,
+    ambiguous: 0,
+    optimized: 0,
+    single: 0,
+    split: 0,
+    stockBlocked: 0,
+    deliveryBlocked: 0,
+    integrityBlocked: 0,
+    varianceInv: 0,
+    varianceResolved: 0,
+    varianceUnresolved: 0,
+    savings: 0,
+  };
   for (const r of completedRuns) {
     if (!r.autonomousRunJson) continue;
     try {
@@ -297,16 +315,57 @@ export default async function AutonomousOpsDashboardPage() {
             EXTREME_VARIANCE_RATE?: number;
             COMMERCIAL_INTEGRITY_PASS_RATE?: number;
           };
+          optimizerMetrics?: {
+            linesResearched?: number;
+            totalCandidates?: number;
+            linesWithAtLeast3?: number;
+            exactOrEquivalent?: number;
+            ambiguousMatches?: number;
+            linesOptimized?: number;
+            singleSupplierStrategies?: number;
+            splitSupplierStrategies?: number;
+            stockBlocked?: number;
+            deliveryBlocked?: number;
+            integrityBlocked?: number;
+            extremeVarianceInvestigations?: number;
+            varianceResolved?: boolean;
+            varianceUnresolved?: boolean;
+            potentialSavingsVsFirstValid?: number;
+            procurementSavingsIdentified?: number;
+          };
         };
       };
       const m = run.artifacts?.integrityMetrics;
-      if (!m) continue;
-      integrityAgg.n += 1;
-      integrityAgg.qty += m.QUANTITY_RECONCILIATION_RATE ?? 0;
-      integrityAgg.pack += m.PACK_SIZE_RESOLUTION_RATE ?? 0;
-      integrityAgg.basis += m.PRICE_BASIS_RESOLUTION_RATE ?? 0;
-      integrityAgg.extreme += m.EXTREME_VARIANCE_RATE ?? 0;
-      integrityAgg.pass += m.COMMERCIAL_INTEGRITY_PASS_RATE ?? 0;
+      if (m) {
+        integrityAgg.n += 1;
+        integrityAgg.qty += m.QUANTITY_RECONCILIATION_RATE ?? 0;
+        integrityAgg.pack += m.PACK_SIZE_RESOLUTION_RATE ?? 0;
+        integrityAgg.basis += m.PRICE_BASIS_RESOLUTION_RATE ?? 0;
+        integrityAgg.extreme += m.EXTREME_VARIANCE_RATE ?? 0;
+        integrityAgg.pass += m.COMMERCIAL_INTEGRITY_PASS_RATE ?? 0;
+      }
+      const o = run.artifacts?.optimizerMetrics;
+      if (o) {
+        optAgg.n += 1;
+        optAgg.lines += o.linesResearched ?? 0;
+        optAgg.candidates += o.totalCandidates ?? 0;
+        optAgg.lines3 += o.linesWithAtLeast3 ?? 0;
+        optAgg.exact += o.exactOrEquivalent ?? 0;
+        optAgg.ambiguous += o.ambiguousMatches ?? 0;
+        optAgg.optimized += o.linesOptimized ?? 0;
+        optAgg.single += o.singleSupplierStrategies ?? 0;
+        optAgg.split += o.splitSupplierStrategies ?? 0;
+        optAgg.stockBlocked += o.stockBlocked ?? 0;
+        optAgg.deliveryBlocked += o.deliveryBlocked ?? 0;
+        optAgg.integrityBlocked += o.integrityBlocked ?? 0;
+        optAgg.varianceInv += o.extremeVarianceInvestigations ?? 0;
+        if (o.varianceResolved) optAgg.varianceResolved += 1;
+        if (o.varianceUnresolved) optAgg.varianceUnresolved += 1;
+        optAgg.savings +=
+          o.procurementSavingsIdentified ??
+          o.potentialSavingsVsFirstValid ??
+          0;
+      }
     } catch {
       /* ignore */
     }
@@ -315,6 +374,8 @@ export default async function AutonomousOpsDashboardPage() {
     integrityAgg.n
       ? `${((v / integrityAgg.n) * 100).toFixed(0)}%`
       : "—";
+  const avgCand =
+    optAgg.lines > 0 ? (optAgg.candidates / optAgg.lines).toFixed(1) : "—";
 
   return (
     <div className="space-y-6">
@@ -324,9 +385,9 @@ export default async function AutonomousOpsDashboardPage() {
         </h1>
         <p className="mt-1 text-sm text-[var(--fg-muted)]">
           Prep autonomy {prepOn ? "ON" : "OFF"} · Live web research ON ·
-          Commercial integrity gate ON · Submission autonomy{" "}
-          {submitOff ? "OFF" : "ON (blocked)"} · Manual supplier quotes remain
-          fallback
+          Commercial integrity gate ON · Procurement optimizer ON · Submission
+          autonomy {submitOff ? "OFF" : "ON (blocked)"} · Manual supplier quotes
+          remain fallback
         </p>
       </div>
 
@@ -427,6 +488,24 @@ export default async function AutonomousOpsDashboardPage() {
         <Metric
           label="COMMERCIAL_INTEGRITY_PASS_RATE"
           value={integrityPct(integrityAgg.pass)}
+        />
+        <Metric label="Tender lines researched" value={String(optAgg.lines || "—")} />
+        <Metric label="Avg candidates/line" value={avgCand} />
+        <Metric label="Lines with ≥3 candidates" value={String(optAgg.lines3 || "—")} />
+        <Metric label="Exact/equivalent matches" value={String(optAgg.exact || "—")} />
+        <Metric label="Ambiguous matches" value={String(optAgg.ambiguous || "—")} />
+        <Metric label="Lines optimized" value={String(optAgg.optimized || "—")} />
+        <Metric label="Single-supplier strategies" value={String(optAgg.single || "—")} />
+        <Metric label="Split-supplier strategies" value={String(optAgg.split || "—")} />
+        <Metric label="Stock-blocked candidates" value={String(optAgg.stockBlocked || "—")} />
+        <Metric label="Delivery-blocked candidates" value={String(optAgg.deliveryBlocked || "—")} />
+        <Metric label="Integrity-blocked candidates" value={String(optAgg.integrityBlocked || "—")} />
+        <Metric label="Extreme variance investigations" value={String(optAgg.varianceInv || "—")} />
+        <Metric label="Variance resolved" value={String(optAgg.varianceResolved || "—")} />
+        <Metric label="Variance unresolved" value={String(optAgg.varianceUnresolved || "—")} />
+        <Metric
+          label="Procurement savings identified"
+          value={optAgg.savings ? formatZar(optAgg.savings) : "—"}
         />
         <Metric
           label="Top research failures"

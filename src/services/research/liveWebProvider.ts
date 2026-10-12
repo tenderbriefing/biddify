@@ -130,6 +130,86 @@ export class LiveWebResearchProvider implements ProductResearchProvider {
     return this.http.fetchCount;
   }
 
+  /**
+   * Lightweight catalogue-only enrichment (no HTML page fetches).
+   * Used by Procurement Optimizer second-pass for pack discovery under budget.
+   */
+  async catalogueQuickSearch(
+    lineNumber: number,
+    shortQueries: string[],
+  ): Promise<ResearchCandidate[]> {
+    const catalog = new TakealotCatalogSearch(this.http);
+    const out: ResearchCandidate[] = [];
+    const seen = new Set<string>();
+    for (const q of shortQueries) {
+      this.emit({
+        type: "SEARCH_QUERY_GENERATED",
+        lineNumber,
+        query: {
+          query: q,
+          reason: "catalogue-quick pack/multi-candidate enrichment",
+          lineNumber,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      try {
+        const hits = await catalog.search(
+          q,
+          RESEARCH_POLICY.budget.maxSearchResultsPerQuery,
+        );
+        for (const hit of hits) {
+          const key = hit.url.split("?")[0].toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const page = pageFromCatalogHit(hit as TakealotProductHit, this.now());
+          const price = page.price.normalizedUsablePrice;
+          out.push({
+            sourceName: `MARKETPLACE:${classifyDomain(hit.url)}`,
+            sourceType: page.sourceType,
+            productName: page.productName ?? hit.title,
+            brand: page.brand,
+            modelSku: page.modelSku,
+            productUrl: page.finalUrl,
+            price,
+            priceKnown: Boolean(page.price.usableForAutonomousPricing && price != null),
+            vatTreatment: "VAT_INCLUSIVE",
+            packSize: page.packSize,
+            packUnit: page.packSize && page.packSize > 1 ? "PACK" : "EACH",
+            effectiveUnitCost:
+              price != null && page.packSize && page.packSize > 1
+                ? Math.round((price / page.packSize) * 100) / 100
+                : price,
+            availability: page.availability,
+            deliveryCost: page.delivery.amount,
+            deliveryKnown: page.delivery.known,
+            evidenceLevel: page.evidenceLevel,
+            retrievedAt: page.retrievedAt,
+            evidenceAgeHours: 0,
+            rawEvidence: {
+              provider: this.id,
+              catalogueQuick: true,
+              query: q,
+              delivery: page.delivery,
+              packCalculation: page.packSize
+                ? { flag: "OK", packSize: page.packSize }
+                : null,
+              sourceQuality: page.sourceQuality,
+              description: page.description,
+            },
+          });
+          this.emit({
+            type: "PRODUCT_SOURCE_DISCOVERED",
+            lineNumber,
+            hit,
+          });
+        }
+      } catch {
+        /* isolate */
+      }
+    }
+    return out;
+  }
+
   async search(query: ResearchQuery): Promise<ResearchCandidate[]> {
     const started = Date.now();
     const failures: string[] = [];
@@ -147,6 +227,7 @@ export class LiveWebResearchProvider implements ProductResearchProvider {
         brandRequirement: brandRule.brand ?? query.brandRequirement,
         modelRequirement: query.modelRequirement,
         technicalSpecifications: query.technicalSpecifications,
+        unit: query.unit,
       },
       RESEARCH_POLICY.budget.maxQueriesPerLine,
     );

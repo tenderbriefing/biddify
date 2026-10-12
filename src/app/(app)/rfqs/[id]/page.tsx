@@ -775,7 +775,33 @@ export default async function RfqWorkspacePage({
               </span>
             )}
           </div>
-          <ProductResearchPanel lines={rfq.lineItems} />
+          <ProductResearchPanel
+            lines={rfq.lineItems}
+            optimizerSummary={
+              rfq.autonomousRunJson
+                ? (
+                    JSON.parse(rfq.autonomousRunJson) as {
+                      artifacts?: {
+                        procurementOptimizer?: Array<{
+                          lineNumber: number;
+                          strategy?: {
+                            type?: string;
+                            allocations?: Array<{
+                              supplier: string;
+                              unitsAllocated: number;
+                              landedCost: number;
+                            }>;
+                            reasoning?: string;
+                          };
+                          recommended?: string | null;
+                          reason?: string;
+                        }>;
+                      };
+                    }
+                  ).artifacts?.procurementOptimizer
+                : null
+            }
+          />
           {rfq.researchObservations.length > 0 && (
             <div className="panel">
               <div className="panel-header">

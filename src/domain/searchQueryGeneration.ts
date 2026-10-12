@@ -64,6 +64,19 @@ export function generateProductSearchQueries(
     });
   }
 
+  // Battery pack discovery — explicit pack-size searches for integrity
+  if (/battery|aaa|aa\b/i.test(core)) {
+    const size = /\baaa\b/i.test(core) ? "AAA" : /\baa\b/i.test(core) ? "AA" : "";
+    for (const pack of ["pack of 4", "pack of 8", "pack of 10", "pack of 24"]) {
+      out.push({
+        query: compact([brand, size, "alkaline battery", pack, SA_CONTEXT].join(" ")),
+        reason: `Battery pack-size discovery (${pack})`,
+        lineNumber: attrs.lineNumber,
+        timestamp: now,
+      });
+    }
+  }
+
   const primaryParts = [brand, model, core, ...sizeBits.slice(0, 2), SA_CONTEXT, "price"]
     .filter(Boolean)
     .join(" ");

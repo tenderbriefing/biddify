@@ -10,13 +10,22 @@ export const RESEARCH_POLICY = {
     staleMaxDays: 90,
   },
   budget: {
-    maxQueriesPerLine: 3,
+    maxQueriesPerLine: 5,
     maxSearchResultsPerQuery: 8,
-    maxPagesInspectedPerLine: 5,
+    maxPagesInspectedPerLine: 8,
     maxRetriesPerFetch: 1,
     fetchTimeoutMs: 12_000,
-    perRfqMaxFetches: 40,
-    perRfqMaxDurationMs: 180_000,
+    perRfqMaxFetches: 100,
+    perRfqMaxDurationMs: 300_000,
+    /** Procurement Optimizer V1 — seek enough evidence for a decision. */
+    minCandidatesTargetPerLine: 3,
+    maxSecondSourceVarianceSearches: 4,
+    maxDeliveryResolutionAttempts: 2,
+  },
+  optimizer: {
+    enabled: true,
+    preferLandedOverDisplayed: true,
+    allowSplitSupplier: true,
   },
   delivery: {
     /** Fraction of product cost above which unknown delivery is MATERIAL. */
