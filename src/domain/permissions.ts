@@ -25,7 +25,10 @@ export type Permission =
   | "approval:founder"
   | "submission:prepare"
   | "submission:execute"
+  | "sourcing:send"
+  | "government:submit"
   | "admin:users"
+  | "admin:outbound"
   | "audit:read";
 
 const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
@@ -46,7 +49,10 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "approval:founder",
     "submission:prepare",
     "submission:execute",
+    "sourcing:send",
+    "government:submit",
     "admin:users",
+    "admin:outbound",
     "audit:read",
   ],
   ADMIN: [
@@ -64,7 +70,9 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "compliance:write",
     "approval:review",
     "submission:prepare",
+    "sourcing:send",
     "admin:users",
+    "admin:outbound",
     "audit:read",
   ],
   BID_MANAGER: [
@@ -81,6 +89,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "compliance:write",
     "approval:review",
     "submission:prepare",
+    "sourcing:send",
     "audit:read",
   ],
   REVIEWER: [
@@ -119,4 +128,14 @@ export function canFounderApprove(role: Role): boolean {
 
 export function canExecuteSubmission(role: Role): boolean {
   return hasPermission(role, "submission:execute");
+}
+
+/** Supplier sourcing send — not government submission. */
+export function canSendSupplierSourcing(role: Role): boolean {
+  return hasPermission(role, "sourcing:send");
+}
+
+/** Government bid submit remains Founder-controlled. */
+export function canSubmitGovernmentBid(role: Role): boolean {
+  return hasPermission(role, "government:submit");
 }

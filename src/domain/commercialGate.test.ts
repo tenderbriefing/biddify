@@ -32,11 +32,27 @@ describe("commercial profitability gate", () => {
       productsCompliant: "UNKNOWN",
       deliveryFeasible: "UNKNOWN",
       complianceFeasible: "UNKNOWN",
+      realBiddingCompany: true,
+      vatTreatmentKnown: true,
+      workingCapitalUnderstood: true,
     });
     expect(result.gate).toBe("AMBER");
     expect(result.reasons.some((r) => /PUBLIC_PRICE_REFERENCE/.test(r))).toBe(
       true,
     );
+  });
+
+  it("public pricing alone cannot produce normal GREEN", () => {
+    const result = evaluateCommercialGate({
+      ...baseGreen,
+      hasSupplierQuote: false,
+      bestEvidenceType: "PUBLIC_PRICE_REFERENCE",
+      realBiddingCompany: true,
+      companyCompliant: true,
+      vatTreatmentKnown: true,
+      workingCapitalUnderstood: true,
+    });
+    expect(result.gate).not.toBe("GREEN");
   });
 
   it("produces RED on objective commercial failure", () => {

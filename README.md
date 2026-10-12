@@ -13,10 +13,11 @@ Primary initial focus: South African public-sector **supply and deliver** opport
 | Phase 0 — Repository initialisation | Implemented |
 | Phase 1 — Foundation | Implemented (approved) |
 | Phase 2 — RFQ ops + real data boundary | Implemented (approved) |
-| Phase 3 — Supplier intelligence & commercial proof | Implemented — awaiting Founder review |
-| Phase 4+ | Awaiting Founder approval |
+| Phase 3 — Supplier intelligence & commercial proof | Conditional pass (approved) |
+| Phase 4 — Real companies, Gmail, autonomous sourcing | In progress — certification gated |
+| Phase 5+ | Awaiting Founder approval |
 
-**Not deployed. No TenderBriefing production writes. No real email. No RFQ submissions. No Gmail.**
+**Not deployed. No government submissions. Gmail send requires certification + Founder approval.**
 
 Integration boundary: public eTenders OCDS via `TenderSourceAdapter` — see [docs/INTEGRATION_BOUNDARY.md](docs/INTEGRATION_BOUNDARY.md).
 
@@ -108,13 +109,22 @@ Filter UI for real imports: `/rfqs?real=1`
 npm run phase3:pilot
 ```
 
-Document-first pipeline for BID-000011 (Johannesburg Water / Cydna Lab consumables):
+Document-first pipeline for BID-000011. Public prices are never stored as `SUPPLIER_QUOTE`.
 
-source PDF → hash-cached extract → verified line items → real public suppliers →
-`DRAFT_NOT_SENT` enquiry drafts → labelled `PUBLIC_PRICE_REFERENCE` / manual logistics →
-comparison → landed cost → 20% markup scenario → working capital → GREEN/AMBER/RED.
+## Phase 4 — real companies & Gmail
 
-Does **not** send supplier email or submit bids. Public prices are never stored as `SUPPLIER_QUOTE`.
+```bash
+npm run phase4:onboard
+npm run phase4:cert-preview
+```
+
+- Onboards Orison Chemicals / Orison Services from compliance vault evidence (no invented fields).
+- DEMO entities are `dataMode=TEST` and blocked from outbound.
+- Connect Gmail via `/settings/gmail` (OAuth discover → explicit company map).
+- Certification preview builds Founder-reviewable drafts; **does not send** until approved.
+- Scopes: [docs/GMAIL_SCOPES.md](docs/GMAIL_SCOPES.md).
+- Kill switch + company/Gmail send controls on `/settings/gmail`.
+- Founder Bid Queue: `/founder-queue`.
 
 ## Licence
 

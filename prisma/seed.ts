@@ -89,6 +89,9 @@ async function main() {
       geographicCoverage: "Gauteng, Free State, North West",
       notes: "DEMO company — not VAT registered. Do not use for real bids.",
       isDemo: true,
+      dataMode: "TEST",
+      vatStatusKnown: true,
+      outboundSourcingEnabled: false,
       documents: {
         create: [
           {
@@ -131,6 +134,9 @@ async function main() {
       geographicCoverage: "Western Cape, Eastern Cape",
       notes: "DEMO company — VAT registered for VAT logic testing only.",
       isDemo: true,
+      dataMode: "TEST",
+      vatStatusKnown: true,
+      outboundSourcingEnabled: false,
     },
   });
 
@@ -146,6 +152,8 @@ async function main() {
       deliveryCapability: "Gauteng 2-3 days",
       notes: "DEMO supplier — reliable for stationery RFQs.",
       isDemo: true,
+      dataMode: "TEST",
+      emailVerified: false,
       contacts: {
         create: [
           {
@@ -169,6 +177,8 @@ async function main() {
       deliveryCapability: "Major metros 5-7 days",
       notes: "DEMO supplier — IT equipment specialist.",
       isDemo: true,
+      dataMode: "TEST",
+      emailVerified: false,
       contacts: {
         create: [
           {
@@ -189,6 +199,8 @@ async function main() {
       geographicCoverage: "Gauteng, KZN",
       paymentTerms: "COD",
       isDemo: true,
+      dataMode: "TEST",
+      emailVerified: false,
     },
   });
 
@@ -245,6 +257,7 @@ async function main() {
         "Supply-and-deliver fit; clear specs; supplier available. DEMO data.",
       selectedCompanyId: companyA.id,
       isDemo: true,
+      dataMode: "TEST",
       lineItems: {
         create: [
           {
@@ -433,6 +446,7 @@ async function main() {
         "Good supply-and-deliver fit; working capital risk from deposit terms.",
       selectedCompanyId: companyB.id,
       isDemo: true,
+      dataMode: "TEST",
       lineItems: {
         create: [
           {
@@ -535,6 +549,7 @@ async function main() {
       profitabilityGate: "AMBER",
       selectedCompanyId: companyA.id,
       isDemo: true,
+      dataMode: "TEST",
       lineItems: {
         create: [
           {
@@ -591,6 +606,7 @@ async function main() {
       opportunityScore: 60,
       profitabilityGate: "UNREVIEWED",
       isDemo: true,
+      dataMode: "TEST",
       lineItems: {
         create: [
           {
@@ -631,6 +647,7 @@ async function main() {
       profitabilityGate: "GREEN",
       selectedCompanyId: companyB.id,
       isDemo: true,
+      dataMode: "TEST",
     },
   });
 
@@ -653,6 +670,7 @@ async function main() {
       noBidReason: "Mandatory construction grading we do not possess",
       profitabilityGate: "RED",
       isDemo: true,
+      dataMode: "TEST",
     },
   });
 
@@ -676,6 +694,7 @@ async function main() {
       profitabilityGate: "GREEN",
       selectedCompanyId: companyA.id,
       isDemo: true,
+      dataMode: "TEST",
     },
   });
 

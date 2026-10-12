@@ -3,6 +3,8 @@ import {
   assertPermission,
   canExecuteSubmission,
   canFounderApprove,
+  canSendSupplierSourcing,
+  canSubmitGovernmentBid,
   hasPermission,
 } from "./permissions";
 
@@ -18,6 +20,12 @@ describe("RBAC permissions", () => {
   it("restricts submission execute to FOUNDER", () => {
     expect(canExecuteSubmission("FOUNDER")).toBe(true);
     expect(canExecuteSubmission("ADMIN")).toBe(false);
+  });
+
+  it("separates supplier sourcing send from government submit", () => {
+    expect(canSendSupplierSourcing("BID_MANAGER")).toBe(true);
+    expect(canSubmitGovernmentBid("BID_MANAGER")).toBe(false);
+    expect(canSubmitGovernmentBid("FOUNDER")).toBe(true);
   });
 
   it("allows READ_ONLY to read but not write RFQs", () => {

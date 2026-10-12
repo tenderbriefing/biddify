@@ -17,7 +17,8 @@ export default async function CompaniesPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Companies</h1>
           <p className="muted mt-1">
-            Multiple bidding companies. VAT status is explicit and never inferred.
+            Operational companies only for real RFQs. DEMO/TEST fixtures cannot
+            send email or bid. VAT status is never inferred.
           </p>
         </div>
         <DemoBadge />
@@ -28,10 +29,11 @@ export default async function CompaniesPage() {
           <thead>
             <tr>
               <th>Company</th>
+              <th>Mode</th>
               <th>Registration</th>
               <th>VAT</th>
-              <th>B-BBEE</th>
-              <th>Coverage</th>
+              <th>Readiness</th>
+              <th>Outbound</th>
               <th>RFQs</th>
               <th>Docs</th>
             </tr>
@@ -53,12 +55,38 @@ export default async function CompaniesPage() {
                     </div>
                   )}
                 </td>
+                <td>
+                  <span className="badge badge-slate">
+                    {c.dataMode ?? (c.isDemo ? "TEST" : "OPERATIONAL")}
+                  </span>
+                </td>
                 <td className="mono text-xs">{c.registrationNumber ?? "—"}</td>
                 <td>
                   <VatBadge vatRegistered={c.vatRegistered} />
+                  {!c.vatStatusKnown && (
+                    <div className="muted text-[10px]">VAT UNKNOWN</div>
+                  )}
                 </td>
-                <td>{c.beeLevel ?? "—"}</td>
-                <td className="text-xs">{c.geographicCoverage ?? "—"}</td>
+                <td>
+                  <span
+                    className={`badge ${
+                      c.readinessOverall === "READY"
+                        ? "badge-green"
+                        : "badge-amber"
+                    }`}
+                  >
+                    {c.readinessOverall}
+                  </span>
+                </td>
+                <td>
+                  <span
+                    className={`badge ${
+                      c.outboundSourcingEnabled ? "badge-green" : "badge-red"
+                    }`}
+                  >
+                    {c.outboundSourcingEnabled ? "ON" : "OFF"}
+                  </span>
+                </td>
                 <td className="mono">{c._count.rfqs}</td>
                 <td className="mono">{c._count.documents}</td>
               </tr>

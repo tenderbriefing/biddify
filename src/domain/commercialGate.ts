@@ -17,6 +17,11 @@ export type CommercialGateInput = {
   oemObtainable?: boolean | "UNKNOWN";
   allPricesKnown: boolean;
   deliveryCostKnown: boolean;
+  /** Phase 4: real operational bidding company required for GREEN. */
+  realBiddingCompany?: boolean;
+  companyCompliant?: boolean | "UNKNOWN";
+  vatTreatmentKnown?: boolean;
+  workingCapitalUnderstood?: boolean;
 };
 
 export type CommercialGateResult = {
@@ -97,6 +102,21 @@ export function evaluateCommercialGate(
     return { gate: "RED", reasons };
   }
 
+  if (input.realBiddingCompany === false) {
+    reasons.push("No real bidding company selected");
+  }
+  if (input.companyCompliant === false) {
+    reasons.push("Company compliance not ready");
+  } else if (input.companyCompliant === "UNKNOWN") {
+    reasons.push("Company compliance UNKNOWN");
+  }
+  if (input.vatTreatmentKnown === false) {
+    reasons.push("VAT treatment UNKNOWN");
+  }
+  if (input.workingCapitalUnderstood === false) {
+    reasons.push("Working capital not understood");
+  }
+
   const greenReady =
     input.specificationsClear &&
     input.lineItemsVerified &&
@@ -111,7 +131,12 @@ export function evaluateCommercialGate(
     input.workingCapitalIntensity !== "HIGH" &&
     input.grossProfit > 0 &&
     input.grossMarginPercent >= 12 &&
-    (!input.oemRequired || input.oemObtainable === true);
+    (!input.oemRequired || input.oemObtainable === true) &&
+    input.realBiddingCompany !== false &&
+    input.companyCompliant !== false &&
+    input.companyCompliant !== "UNKNOWN" &&
+    input.vatTreatmentKnown !== false &&
+    input.workingCapitalUnderstood !== false;
 
   if (greenReady) {
     reasons.push(

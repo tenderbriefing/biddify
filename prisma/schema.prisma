@@ -1,6 +1,7 @@
-// Biddify domain model — Phase 1 foundation
-// Local/dev: SQLite (zero infra cost). Production target: PostgreSQL.
+// Biddify domain model — Phase 4 operational sourcing
+// Local/dev: SQLite may remain for certification. Production: PostgreSQL before multi-user/remote.
 // Switch provider + DATABASE_URL when deploying; review migrations first.
+// DEMO entities are fixtures only — never used for real outbound or real RFQ bidding.
 
 generator client {
   provider = "prisma-client-js"
@@ -96,6 +97,29 @@ enum AuditAction {
   QUOTE_RECORDED
   PRICING_CALCULATED
   COMMERCIAL_GATE_SET
+  COMPANY_ONBOARDED
+  COMPANY_DOCUMENT_STORED
+  GMAIL_CONNECTED
+  GMAIL_MAPPED
+  GMAIL_SYNC
+  SOURCING_REQUEST_CREATED
+  CERTIFICATION_PREVIEW
+  CERTIFICATION_APPROVED
+  EMAIL_SENT
+  EMAIL_SEND_FAILED
+  EMAIL_REPLY_INGESTED
+  ATTACHMENT_INGESTED
+  QUOTE_EXTRACTED
+  CLARIFICATION_SENT
+  FOLLOW_UP_SENT
+  SUPPLIER_SUPPRESSED
+  OUTBOUND_PAUSED
+  OUTBOUND_RESUMED
+  AUTONOMY_ACTIVATED
+  AUTONOMY_DISABLED
+  GOVERNMENT_SUBMIT_BLOCKED
+  CAPITAL_LIMIT_FLAGGED
+  FOUNDER_OVERRIDE
 }
 
 enum OpportunityClass {
@@ -192,6 +216,8 @@ enum EnquiryDeliveryState {
   READY_TO_SEND
   SENT
   FAILED
+  HELD
+  SUPPRESSED
 }
 
 enum FactProvenance {
@@ -199,6 +225,72 @@ enum FactProvenance {
   HEURISTIC
   AI_INTERPRETATION
   MANUAL
+}
+
+enum DataMode {
+  TEST
+  OPERATIONAL
+}
+
+enum OutboundMode {
+  DISABLED
+  CERTIFICATION
+  AUTONOMOUS
+}
+
+enum GmailConnectionStatus {
+  DISCONNECTED
+  PENDING
+  CONNECTED
+  ERROR
+  REVOKED
+}
+
+enum EmailDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum EmailClassification {
+  SUPPLIER_RFQ
+  FORMAL_QUOTE
+  PRICE_IN_EMAIL
+  OUT_OF_STOCK
+  DECLINED
+  NEED_MORE_INFORMATION
+  ALTERNATIVE_PRODUCT
+  OEM_AUTHORIZATION_INFO
+  DELIVERY_INFORMATION
+  PAYMENT_TERMS
+  FOLLOW_UP
+  CLARIFICATION
+  BOUNCE
+  OTHER
+  UNKNOWN
+}
+
+enum SourcingStrategy {
+  PUBLIC_PRICE_SUFFICIENT_FOR_INITIAL_REVIEW
+  HISTORICAL_PRICE_REFERENCE
+  FORMAL_SUPPLIER_QUOTE_REQUIRED
+  OEM_AUTHORIZATION_REQUIRED
+  SPECIALIST_SUPPLIER_REQUIRED
+}
+
+enum SupplierSuppressionReason {
+  DO_NOT_CONTACT
+  BOUNCED
+  INVALID_ADDRESS
+  UNSUBSCRIBED
+  REQUESTED_NO_EMAIL
+  TEMPORARY_HOLD
+}
+
+enum ReadinessState {
+  READY
+  ACTION_REQUIRED
+  NOT_APPLICABLE
+  UNKNOWN
 }
 
 model User {
@@ -223,8 +315,11 @@ model Company {
   tradingName        String?
   registrationNumber String?
   csdNumber          String?
+  csdMaaaNumber      String?
   taxNumber          String?
   vatRegistered      Boolean  @default(false)
+  /// False until VAT status verified from CSD/tax docs — never invent.
+  vatStatusKnown     Boolean  @default(false)
   vatNumber          String?
   beeLevel           String?
   beeExpiry          DateTime?
@@ -239,17 +334,33 @@ model Company {
   contactEmail       String?
   contactPhone       String?
   commodityNotes     String?
+  commodityCategories String?
   geographicCoverage String?
+  capabilities       String?
   restrictions       String?
+  relatedCompanyGroupId String?
+  relatedCompanyNotes String?
+  evidenceSource     String?
+  readinessOverall   ReadinessState @default(UNKNOWN)
+  readinessDetails   String?
+  outboundSourcingEnabled Boolean @default(false)
+  dataMode           DataMode @default(OPERATIONAL)
   notes              String?
   isDemo             Boolean  @default(false)
   isActive           Boolean  @default(true)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
-  documents CompanyDocument[]
-  rfqs      Rfq[]
-  bids      Bid[]
+  documents     CompanyDocument[]
+  rfqs          Rfq[]
+  bids          Bid[]
+  gmailAccounts GmailAccount[]
+  emails        EmailMessage[]
+  sourcingRequests SourcingRequest[]
+
+  @@index([isDemo])
+  @@index([dataMode])
+  @@index([relatedCompanyGroupId])
 }
 
 model CompanyDocument {
@@ -262,6 +373,10 @@ model CompanyDocument {
   version          String?
   verificationState ComplianceItemState @default(AVAILABLE)
   storageKey       String?
+  localPath        String?
+  contentHash      String?
+  sourcePath       String?
+  uploadedAt       DateTime             @default(now())
   notes            String?
   isDemo           Boolean              @default(false)
   createdAt        DateTime             @default(now())
@@ -270,6 +385,7 @@ model CompanyDocument {
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   @@index([companyId])
+  @@index([contentHash])
 }
 
 model Supplier {
@@ -277,6 +393,9 @@ model Supplier {
   name                String
   website             String?
   email               String?
+  /// False until email verified from published/confirmed source — never invent.
+  emailVerified       Boolean  @default(false)
+  emailEvidence       String?
   telephone           String?
   categories          String?
   brands              String?
@@ -291,6 +410,17 @@ model Supplier {
   verificationStatus  String   @default("UNVERIFIED")
   evidenceUrl         String?
   location            String?
+  suppressionReason   SupplierSuppressionReason?
+  suppressedAt        DateTime?
+  suppressionNotes    String?
+  rfqsRequestedCount  Int      @default(0)
+  responsesCount      Int      @default(0)
+  quotesCount         Int      @default(0)
+  lastContactedAt     DateTime?
+  medianResponseHours Float?
+  scoreBreakdown      String?
+  scoreTotal          Float?
+  dataMode            DataMode @default(OPERATIONAL)
   isDemo              Boolean  @default(false)
   isActive            Boolean  @default(true)
   createdAt           DateTime @default(now())
@@ -299,6 +429,12 @@ model Supplier {
   contacts  SupplierContact[]
   quotes    SupplierQuote[]
   enquiries SupplierEnquiry[]
+  emails    EmailMessage[]
+  sourcingRequests SourcingRequest[]
+  suppressions SupplierSuppression[]
+
+  @@index([isDemo])
+  @@index([email])
 }
 
 model SupplierContact {
@@ -385,6 +521,22 @@ model Rfq {
   /// True for genuine procurement source imports (not DEMO seed).
   isRealSource          Boolean            @default(false)
   isDemo                Boolean            @default(false)
+  dataMode              DataMode           @default(OPERATIONAL)
+  recommendedCompanyId  String?
+  companySelectionReason String?
+  companySelectionBlockers String?
+  sourcingStrategy      SourcingStrategy?
+  sourcingHold          Boolean            @default(false)
+  sourcingStopReason    String?
+  costConfidence        Int?
+  costConfidenceReasons String?
+  specConfidence        Int?
+  specConfidenceReasons String?
+  bidPriority           Int?
+  bidPriorityReasons    String?
+  capitalEfficiency     Float?
+  fundingRequired       Boolean            @default(false)
+  inFounderBidQueue     Boolean            @default(false)
   createdAt             DateTime           @default(now())
   updatedAt             DateTime           @updatedAt
 
@@ -400,6 +552,8 @@ model Rfq {
   bids            Bid[]
   statusEvents    RfqStatusEvent[]
   enquiries       SupplierEnquiry[]
+  emails          EmailMessage[]
+  sourcingRequests SourcingRequest[]
 
   @@unique([source, sourceOpportunityId])
   @@index([status])
@@ -409,6 +563,8 @@ model Rfq {
   @@index([classification])
   @@index([nextAction])
   @@index([duplicateGroupId])
+  @@index([inFounderBidQueue])
+  @@index([dataMode])
 }
 
 model RfqLineItem {
@@ -740,19 +896,187 @@ model AuditEvent {
 }
 
 model EmailMessage {
-  id             String   @id @default(cuid())
-  companyId      String?
-  rfqId          String?
-  sender         String
-  recipient      String
-  subject        String
-  body           String
-  deliveryState  String   @default("MOCK_HELD")
-  workflow       String?
-  isMock         Boolean  @default(true)
-  sentAt         DateTime?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id               String             @id @default(cuid())
+  gmailAccountId   String?
+  companyId        String?
+  rfqId            String?
+  supplierId       String?
+  sourcingRequestId String?
+  direction        EmailDirection     @default(OUTBOUND)
+  gmailMessageId   String?
+  gmailThreadId    String?
+  sender           String
+  recipients       String
+  cc               String?
+  subject          String
+  bodyText         String?
+  bodyHtml         String?
+  classification   EmailClassification @default(UNKNOWN)
+  classificationConfidence Float?
+  processingState  String             @default("PENDING")
+  deliveryState    String             @default("DRAFT")
+  workflow         String?
+  idempotencyKey   String?            @unique
+  isMock           Boolean            @default(false)
+  isRelevant       Boolean            @default(true)
+  sentAt           DateTime?
+  receivedAt       DateTime?
+  errorMessage     String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  gmailAccount    GmailAccount?    @relation(fields: [gmailAccountId], references: [id])
+  company         Company?         @relation(fields: [companyId], references: [id])
+  rfq             Rfq?             @relation(fields: [rfqId], references: [id])
+  supplier        Supplier?        @relation(fields: [supplierId], references: [id])
+  sourcingRequest SourcingRequest? @relation(fields: [sourcingRequestId], references: [id])
+  attachments     EmailAttachment[]
 
   @@index([rfqId])
+  @@index([gmailThreadId])
+  @@index([gmailMessageId])
+  @@index([companyId])
+  @@index([supplierId])
+}
+
+model EmailAttachment {
+  id              String   @id @default(cuid())
+  emailMessageId  String
+  fileName        String
+  mimeType        String?
+  byteSize        Int?
+  contentHash     String?
+  localPath       String?
+  storageKey      String?
+  createdAt       DateTime @default(now())
+
+  emailMessage EmailMessage @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+
+  @@index([emailMessageId])
+  @@index([contentHash])
+}
+
+model GmailAccount {
+  id                 String                @id @default(cuid())
+  emailAddress       String                @unique
+  googleAccountId    String?
+  companyId          String?
+  connectionStatus   GmailConnectionStatus @default(DISCONNECTED)
+  scopesGranted      String?
+  sendingEnabled     Boolean               @default(false)
+  receivingEnabled   Boolean               @default(true)
+  mappedAt           DateTime?
+  mappingConfirmedBy String?
+  lastSuccessfulSync DateTime?
+  lastFailedSync     DateTime?
+  syncError          String?
+  labelBiddifyId     String?
+  notes              String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  company  Company?       @relation(fields: [companyId], references: [id])
+  token    GmailToken?
+  emails   EmailMessage[]
+  sourcingRequests SourcingRequest[]
+
+  @@index([companyId])
+  @@index([connectionStatus])
+}
+
+/// Encrypted OAuth tokens — never expose in UI/logs/git.
+model GmailToken {
+  id                   String   @id @default(cuid())
+  gmailAccountId       String   @unique
+  encryptedAccessToken String
+  encryptedRefreshToken String?
+  tokenExpiry          DateTime?
+  encryptionVersion    Int      @default(1)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  gmailAccount GmailAccount @relation(fields: [gmailAccountId], references: [id], onDelete: Cascade)
+}
+
+model SourcingRequest {
+  id               String               @id @default(cuid())
+  reference        String               @unique
+  rfqId            String
+  companyId        String
+  supplierId       String
+  gmailAccountId   String?
+  enquiryId        String?
+  idempotencyKey   String               @unique
+  recipientEmail   String
+  subject          String
+  body             String
+  strategy         SourcingStrategy     @default(FORMAL_SUPPLIER_QUOTE_REQUIRED)
+  deliveryState    EnquiryDeliveryState @default(DRAFT_NOT_SENT)
+  certificationBatch Boolean            @default(false)
+  founderApprovedAt DateTime?
+  founderApprovedBy String?
+  sentAt           DateTime?
+  gmailMessageId   String?
+  gmailThreadId    String?
+  followUpCount    Int                  @default(0)
+  maxFollowUps     Int                  @default(2)
+  nextFollowUpAt   DateTime?
+  stopReason       String?
+  errorMessage     String?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  rfq          Rfq           @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  company      Company       @relation(fields: [companyId], references: [id])
+  supplier     Supplier      @relation(fields: [supplierId], references: [id])
+  gmailAccount GmailAccount? @relation(fields: [gmailAccountId], references: [id])
+  emails       EmailMessage[]
+
+  @@index([rfqId])
+  @@index([supplierId])
+  @@index([companyId])
+  @@index([deliveryState])
+}
+
+model SupplierSuppression {
+  id         String                    @id @default(cuid())
+  supplierId String
+  email      String?
+  reason     SupplierSuppressionReason
+  notes      String?
+  createdAt  DateTime                  @default(now())
+  liftedAt   DateTime?
+
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  @@index([supplierId])
+  @@index([email])
+}
+
+model SystemSettings {
+  id                        String       @id @default("default")
+  outboundMode              OutboundMode @default(DISABLED)
+  globalOutboundPaused      Boolean      @default(true)
+  certificationPassedAt     DateTime?
+  autonomyAuthorisedAt      DateTime?
+  autonomyAuthorisedBy      String?
+  maxEmailsPerHour          Int          @default(10)
+  maxEmailsPerDay           Int          @default(40)
+  maxEmailsPerSupplierPerDay Int         @default(2)
+  maxEmailsPerCompanyPerDay Int          @default(20)
+  supplierCooldownHours     Int          @default(72)
+  maxFollowUps              Int          @default(2)
+  totalProcurementCapitalLimit Decimal?
+  notes                     String?
+  updatedAt                 DateTime     @updatedAt
+  createdAt                 DateTime     @default(now())
+}
+
+model CompanyCapitalLimit {
+  id            String   @id @default(cuid())
+  companyId     String   @unique
+  capitalLimit  Decimal
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }

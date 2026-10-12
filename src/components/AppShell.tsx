@@ -4,9 +4,11 @@ import type { SessionUser } from "@/lib/auth/session";
 
 const NAV = [
   { href: "/", label: "Operations" },
+  { href: "/founder-queue", label: "Founder Queue" },
   { href: "/rfqs", label: "RFQs" },
   { href: "/companies", label: "Companies" },
   { href: "/suppliers", label: "Suppliers" },
+  { href: "/settings/gmail", label: "Gmail / Outbound" },
 ];
 
 export function AppShell({

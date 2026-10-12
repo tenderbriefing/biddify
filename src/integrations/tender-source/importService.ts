@@ -210,6 +210,7 @@ export async function syncOpportunity(
     nextActionReason: next.reason,
     isRealSource: true,
     isDemo: false,
+    dataMode: "OPERATIONAL" as const,
   };
 
   if (!existing) {
