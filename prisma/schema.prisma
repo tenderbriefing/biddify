@@ -152,6 +152,18 @@ enum AuditAction {
   RFQ_INELIGIBLE
   AUTONOMOUS_PROCESSING_FAILED
   AUTONOMOUS_PROCESSING_COMPLETED
+  LIVE_RESEARCH_STARTED
+  SEARCH_QUERY_GENERATED
+  PRODUCT_SOURCE_DISCOVERED
+  PRODUCT_PAGE_INSPECTED
+  PRODUCT_PRICE_OBSERVED
+  PRODUCT_SPEC_OBSERVED
+  PRODUCT_CANDIDATE_REJECTED
+  PRODUCT_CANDIDATE_SELECTED
+  MULTI_SOURCE_PRICE_VALIDATED
+  DELIVERY_EVIDENCE_CAPTURED
+  RISK_ALLOWANCE_APPLIED
+  LIVE_RESEARCH_COMPLETED
 }
 
 enum OpportunityClass {
@@ -729,6 +741,9 @@ model Rfq {
   autonomousClaimToken  String?
   autonomousClaimExpiresAt DateTime?
   autonomousRunJson     String?
+  /// Live web research metrics JSON (coverage, timing, sources).
+  liveResearchMetricsJson String?
+  webResearchCoverage   Float?
   createdAt             DateTime           @default(now())
   updatedAt             DateTime           @updatedAt
 
@@ -748,6 +763,7 @@ model Rfq {
   sourcingRequests SourcingRequest[]
   productResearchCandidates ProductResearchCandidate[]
   autonomousQuotations AutonomousQuotation[]
+  researchObservations ResearchObservation[]
 
   @@unique([source, sourceOpportunityId])
   @@index([status])
@@ -830,6 +846,14 @@ model ProductResearchCandidate {
   conflictingAttributes String?
   selected          Boolean              @default(false)
   unresolved        Boolean              @default(false)
+  selectionStatus   String?
+  selectionReason   String?
+  researchProvider  String?
+  sourceQuality     Float?
+  priceType         String?
+  packCalculationJson String?
+  deliveryJson      String?
+  attributeComparisonsJson String?
   notes             String?
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
@@ -840,6 +864,29 @@ model ProductResearchCandidate {
   @@index([rfqId])
   @@index([rfqLineItemId])
   @@index([selected])
+  @@index([productUrl])
+}
+
+/// Granular live research evidence (queries, pages, prices) for drill-down.
+model ResearchObservation {
+  id            String   @id @default(cuid())
+  rfqId         String
+  rfqLineItemId String?
+  eventType     String
+  queryText     String?
+  sourceUrl     String?
+  domain        String?
+  payloadJson   String?
+  retrievedAt   DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  rfq Rfq @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+
+  @@index([rfqId])
+  @@index([rfqLineItemId])
+  @@index([eventType])
+  @@index([sourceUrl])
+  @@unique([rfqId, rfqLineItemId, sourceUrl, eventType])
 }
 
 model AutonomousQuotation {

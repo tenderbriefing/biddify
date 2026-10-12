@@ -17,6 +17,8 @@ export default async function AutonomousOpsDashboardPage() {
     exceptions,
     completedRuns,
     settings,
+    researchObs,
+    lineCandidates,
   ] = await Promise.all([
     prisma.rfq.count({ where: { autonomousState: { not: null } } }),
     prisma.rfq.count({
@@ -111,6 +113,8 @@ export default async function AutonomousOpsDashboardPage() {
         autonomousDurationMs: true,
         autonomousRunJson: true,
         autonomousConfidence: true,
+        webResearchCoverage: true,
+        liveResearchMetricsJson: true,
         autonomousQuotations: {
           take: 1,
           select: { totalAmount: true, internalSnapshotJson: true },
@@ -118,6 +122,19 @@ export default async function AutonomousOpsDashboardPage() {
       },
     }),
     prisma.systemSettings.findUnique({ where: { id: "default" } }),
+    prisma.researchObservation.groupBy({
+      by: ["eventType"],
+      _count: true,
+    }),
+    prisma.productResearchCandidate.findMany({
+      where: { researchProvider: { not: null } },
+      select: {
+        rfqLineItemId: true,
+        researchProvider: true,
+        priceKnown: true,
+        selected: true,
+      },
+    }),
   ]);
 
   const avgMs =
@@ -189,6 +206,77 @@ export default async function AutonomousOpsDashboardPage() {
   const prepOn = settings?.autonomousPrepEnabled !== false;
   const submitOff = settings?.autonomousSubmissionEnabled !== true;
 
+  const processed = completedRuns.length;
+  const totalDurationMs = completedRuns.reduce(
+    (s, r) => s + (r.autonomousDurationMs ?? 0),
+    0,
+  );
+  const processedPerHour =
+    totalDurationMs > 0
+      ? (processed / (totalDurationMs / 3_600_000)).toFixed(1)
+      : "—";
+
+  const outcomeTotal =
+    autoQuoted + reviewRequired + unpriceable + ineligible + failed || 1;
+  const pct = (n: number) => `${((n / outcomeTotal) * 100).toFixed(0)}%`;
+
+  const coverageVals = completedRuns
+    .map((r) => (r as { webResearchCoverage?: number | null }).webResearchCoverage)
+    .filter((v): v is number => v != null);
+  // Re-query coverage from stored field via completedRuns select — extend below if missing
+  void coverageVals;
+
+  const linesResearched = new Set(lineCandidates.map((c) => c.rfqLineItemId)).size;
+  const liveLines = new Set(
+    lineCandidates
+      .filter((c) => c.researchProvider === "live-web" && c.priceKnown)
+      .map((c) => c.rfqLineItemId),
+  ).size;
+  const webCoveragePct =
+    linesResearched > 0
+      ? `${((liveLines / linesResearched) * 100).toFixed(0)}%`
+      : "—";
+
+  const byLine = new Map<string, number>();
+  for (const c of lineCandidates) {
+    byLine.set(c.rfqLineItemId, (byLine.get(c.rfqLineItemId) ?? 0) + 1);
+  }
+  const sourceCounts = [...byLine.values()];
+  const multiSourceLines = sourceCounts.filter((n) => n >= 2).length;
+  const singleSourceLines = sourceCounts.filter((n) => n === 1).length;
+  const sourceDenom = sourceCounts.length || 1;
+
+  const researchFailureReasons = researchObs
+    .filter((g) =>
+      /FAILED|REJECTED|BLOCKED|NOT_FOUND/i.test(g.eventType),
+    )
+    .map((g) => ({ reason: g.eventType, count: g._count }));
+
+  const avgResearchTime =
+    completedRuns.length === 0
+      ? null
+      : (() => {
+          let total = 0;
+          let n = 0;
+          for (const r of completedRuns as Array<{
+            liveResearchMetricsJson?: string | null;
+          }>) {
+            if (!r.liveResearchMetricsJson) continue;
+            try {
+              const m = JSON.parse(r.liveResearchMetricsJson) as {
+                metricsByLine?: Record<string, { durationMs?: number }>;
+              };
+              for (const line of Object.values(m.metricsByLine ?? {})) {
+                total += line.durationMs ?? 0;
+                n += 1;
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+          return n ? total / n : null;
+        })();
+
   return (
     <div className="space-y-6">
       <div>
@@ -196,9 +284,9 @@ export default async function AutonomousOpsDashboardPage() {
           Autonomous RFQ Engine
         </h1>
         <p className="mt-1 text-sm text-[var(--fg-muted)]">
-          Prep autonomy {prepOn ? "ON" : "OFF"} · Submission autonomy{" "}
-          {submitOff ? "OFF" : "ON (blocked)"} · Manual supplier quotes remain
-          fallback
+          Prep autonomy {prepOn ? "ON" : "OFF"} · Live web research ON ·
+          Submission autonomy {submitOff ? "OFF" : "ON (blocked)"} · Manual
+          supplier quotes remain fallback
         </p>
       </div>
 
@@ -243,6 +331,50 @@ export default async function AutonomousOpsDashboardPage() {
         <Metric
           label="Est. gross profit"
           value={formatZar(grossProfit)}
+        />
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Metric label="RFQs processed" value={String(processed)} />
+        <Metric label="RFQs processed/hour" value={String(processedPerHour)} />
+        <Metric label="BOQ lines researched" value={String(linesResearched)} />
+        <Metric
+          label="Avg research time/line"
+          value={
+            avgResearchTime == null
+              ? "—"
+              : `${(avgResearchTime / 1000).toFixed(1)}s`
+          }
+        />
+        <Metric
+          label="Avg sources/line"
+          value={
+            sourceCounts.length
+              ? (
+                  sourceCounts.reduce((a, b) => a + b, 0) / sourceCounts.length
+                ).toFixed(1)
+              : "—"
+          }
+        />
+        <Metric
+          label="Single-source %"
+          value={`${((singleSourceLines / sourceDenom) * 100).toFixed(0)}%`}
+        />
+        <Metric
+          label="Multi-source %"
+          value={`${((multiSourceLines / sourceDenom) * 100).toFixed(0)}%`}
+        />
+        <Metric label="WEB_RESEARCH_COVERAGE" value={webCoveragePct} />
+        <Metric label="AUTO_QUOTED %" value={pct(autoQuoted)} />
+        <Metric label="REVIEW_REQUIRED %" value={pct(reviewRequired)} />
+        <Metric label="UNPRICEABLE %" value={pct(unpriceable)} />
+        <Metric
+          label="Top research failures"
+          value={
+            researchFailureReasons[0]
+              ? `${researchFailureReasons[0].reason} (${researchFailureReasons[0].count})`
+              : "—"
+          }
         />
       </div>
 

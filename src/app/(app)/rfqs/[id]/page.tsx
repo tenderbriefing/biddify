@@ -27,6 +27,7 @@ import { prepareFounderReviewAction } from "@/lib/rfq/actions";
 import { QuoteCaptureForm } from "@/components/QuoteCaptureForm";
 import { SupplierComparisonPanel } from "@/components/SupplierComparisonPanel";
 import { FounderCommercialControls } from "@/components/FounderCommercialControls";
+import { ProductResearchPanel } from "@/components/ProductResearchPanel";
 import {
   buildBoqComparison,
   isQuoteExpired,
@@ -40,6 +41,7 @@ const TABS = [
   "decision",
   "overview",
   "specifications",
+  "research",
   "documents",
   "suppliers",
   "quotes",
@@ -68,9 +70,20 @@ export default async function RfqWorkspacePage({
       where: { id },
       include: {
         selectedCompany: true,
-        lineItems: { orderBy: { lineNumber: "asc" } },
+        lineItems: {
+          orderBy: { lineNumber: "asc" },
+          include: {
+            researchCandidates: {
+              orderBy: [{ selected: "desc" }, { createdAt: "desc" }],
+            },
+          },
+        },
         requirements: true,
         documents: true,
+        researchObservations: {
+          orderBy: { createdAt: "desc" },
+          take: 100,
+        },
         quotes: {
           include: {
             supplier: true,
@@ -746,6 +759,39 @@ export default async function RfqWorkspacePage({
               )}
             </ul>
           </div>
+        </div>
+      )}
+
+      {tab === "research" && (
+        <div className="space-y-3">
+          <div className="panel panel-body text-sm">
+            WEB_RESEARCH_COVERAGE:{" "}
+            {rfq.webResearchCoverage != null
+              ? `${(rfq.webResearchCoverage * 100).toFixed(0)}%`
+              : "—"}
+            {rfq.liveResearchMetricsJson && (
+              <span className="muted ml-2">
+                (live metrics stored on RFQ)
+              </span>
+            )}
+          </div>
+          <ProductResearchPanel lines={rfq.lineItems} />
+          {rfq.researchObservations.length > 0 && (
+            <div className="panel">
+              <div className="panel-header">
+                Research observation drill-down ({rfq.researchObservations.length})
+              </div>
+              <ul className="panel-body max-h-64 space-y-1 overflow-auto text-xs">
+                {rfq.researchObservations.map((o) => (
+                  <li key={o.id}>
+                    {o.eventType}
+                    {o.queryText ? ` · ${o.queryText}` : ""}
+                    {o.sourceUrl ? ` · ${o.sourceUrl}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 

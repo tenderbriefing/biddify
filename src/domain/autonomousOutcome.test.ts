@@ -24,7 +24,7 @@ describe("autonomous outcome thresholds", () => {
     expect(r.outcome).toBe("AUTO_QUOTED");
   });
 
-  it("REVIEW_REQUIRED on weak evidence / delivery unknown", () => {
+  it("REVIEW_REQUIRED on MATERIAL unknown delivery (not via markup)", () => {
     const r = classifyAutonomousOutcome({
       eligibility: "ELIGIBLE",
       compulsoryBriefingMissed: false,
@@ -34,13 +34,15 @@ describe("autonomous outcome thresholds", () => {
       lines: [
         {
           ...baseLine,
-          flags: ["UNKNOWN_DELIVERY_COST"],
-          evidenceLevel: "PUBLIC_PRICE_REFERENCE",
+          deliveryMaterialUnknown: true,
+          flags: ["DELIVERY_MATERIAL_UNKNOWN"],
+          evidenceLevel: "WHOLESALER_WEB_PRICE",
         },
       ],
-      confidence: 0.75,
+      confidence: 0.85,
     });
     expect(r.outcome).toBe("REVIEW_REQUIRED");
+    expect(r.reasons.some((x) => /delivery/i.test(x))).toBe(true);
   });
 
   it("UNPRICEABLE when all lines unresolved", () => {

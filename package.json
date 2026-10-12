@@ -25,6 +25,7 @@
     "phase4:cert-send": "tsx scripts/phase4-certification-send.ts",
     "prepare:founder-review": "tsx scripts/prepare-founder-review.ts",
     "autonomous:run": "tsx scripts/run-autonomous-engine.ts",
+    "autonomous:live-cert": "tsx scripts/run-live-research-cert.ts",
     "secret-scan": "bash scripts/secret-scan.sh",
     "gate": "npm run lint && npm run typecheck && npm run test && npm run build && npm run secret-scan",
     "postinstall": "prisma generate"

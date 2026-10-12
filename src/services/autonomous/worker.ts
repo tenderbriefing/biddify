@@ -23,7 +23,6 @@ import { classifySupplyAndDeliver } from "@/domain/supplyDeliverClassifier";
 import { understandDocuments } from "@/domain/documentUnderstanding";
 import { normalizeBoq } from "@/domain/boqNormalization";
 import {
-  CompositeProductResearchProvider,
   EvidenceCatalogueProvider,
   type ResearchCandidate,
 } from "@/domain/productResearch";
@@ -31,7 +30,7 @@ import { matchSpecification } from "@/domain/specificationMatching";
 import { selectBestProductCandidate } from "@/domain/productSelection";
 import { calculateLineLandedCost } from "@/domain/landedCostEngine";
 import {
-  applyMarkupWithMarginDisplay,
+  buildLandedBreakdown,
   selectMarkupPolicy,
 } from "@/domain/markupPolicy";
 import {
@@ -42,6 +41,26 @@ import { classifyAutonomousOutcome } from "@/domain/autonomousOutcome";
 import { evaluateCompanyEligibility } from "@/domain/companyEligibility";
 import { calculatePricing } from "@/domain/pricing";
 import { toNumber } from "@/domain/money";
+import { LiveWebResearchProvider } from "@/services/research/liveWebProvider";
+import type { LiveResearchEvent } from "@/services/research/liveWebProvider";
+import { validateMultiSourcePrices } from "@/domain/multiSourcePricing";
+import {
+  assessDeliveryMateriality,
+  deliveryRiskAllowance,
+  type DeliveryEvidence,
+} from "@/domain/deliveryEvidence";
+import { buildRiskAllowances } from "@/domain/riskAllowance";
+import {
+  scoreLineResearchConfidence,
+  overallSourcingConfidence,
+} from "@/domain/researchConfidence";
+import { mayAutoSelect } from "@/domain/specificationMatching";
+import { RESEARCH_POLICY } from "@/domain/researchPolicy";
+import {
+  ageDaysFromRetrieved,
+  freshnessBand,
+  isUsableForAutonomousPricing,
+} from "@/domain/researchPolicy";
 
 export type ProcessResult = {
   rfqId: string;
@@ -52,6 +71,15 @@ export type ProcessResult = {
   durationMs: number;
   reasons: string[];
   quotationNumber: string | null;
+  webResearchCoverage?: number | null;
+};
+
+export type ProcessOptions = {
+  /** Prefer live web only (no catalogue primary). Default true for V1 live research. */
+  preferLiveWeb?: boolean;
+  /** Include catalogue as fallback when live returns nothing. Default true. */
+  catalogueFallback?: boolean;
+  liveProviderFactory?: () => LiveWebResearchProvider;
 };
 
 type RunArtifacts = {
@@ -59,13 +87,17 @@ type RunArtifacts = {
   documents?: unknown;
   boq?: unknown;
   research?: unknown;
+  liveResearch?: unknown;
   matching?: unknown;
   selection?: unknown;
+  multiSource?: unknown;
   pricing?: unknown;
   markup?: unknown;
+  riskAllowance?: unknown;
   quotation?: unknown;
   outcome?: unknown;
   guardrails?: unknown;
+  webResearchCoverage?: number;
 };
 
 async function transition(
@@ -169,7 +201,10 @@ export async function processClaimedRfq(
   prisma: PrismaClient,
   rfqId: string,
   claimToken: string,
+  processOpts: ProcessOptions = {},
 ): Promise<ProcessResult> {
+  const preferLiveWeb = processOpts.preferLiveWeb !== false;
+  const catalogueFallback = processOpts.catalogueFallback !== false;
   const started = Date.now();
   const settings = await prisma.systemSettings.findUnique({
     where: { id: "default" },
@@ -424,9 +459,19 @@ export async function processClaimedRfq(
       });
     }
 
-    // —— RESEARCH (from existing evidence only — no fabrication) ——
+    // —— LIVE WEB RESEARCH (catalogue is fallback only) ——
     await transition(prisma, rfq.id, "PRODUCT_RESEARCH");
     await prisma.productResearchCandidate.deleteMany({ where: { rfqId: rfq.id } });
+    await prisma.researchObservation.deleteMany({ where: { rfqId: rfq.id } });
+
+    const researchEvents: LiveResearchEvent[] = [];
+    const liveProvider =
+      processOpts.liveProviderFactory?.() ??
+      new LiveWebResearchProvider({
+        onEvent: (e) => {
+          researchEvents.push(e);
+        },
+      });
 
     const legacyEvidence = rfq.quotes.flatMap((q) =>
       q.lineItems.map((li) => ({
@@ -455,42 +500,184 @@ export async function processClaimedRfq(
         rfqLineItemId: li.rfqLineItemId,
       })),
     );
+    const catalogue = new EvidenceCatalogueProvider(legacyEvidence);
 
-    const researchProvider = new CompositeProductResearchProvider([
-      new EvidenceCatalogueProvider(legacyEvidence),
-    ]);
+    await writeAuditEvent(
+      {
+        action: "LIVE_RESEARCH_STARTED",
+        entityType: "Rfq",
+        entityId: rfq.id,
+        metadata: { preferLiveWeb, catalogueFallback },
+      },
+      prisma,
+    );
 
     const researchByLine: Record<
       number,
-      { candidates: ResearchCandidate[]; lineItemId: string }
+      { candidates: ResearchCandidate[]; lineItemId: string; liveCount: number }
     > = {};
+
+    let linesWithLivePricing = 0;
 
     for (const line of normalized) {
       const lineItem = rfq.lineItems.find((l) => l.lineNumber === line.lineNumber)!;
-      const candidates = await researchProvider.search({
-        lineNumber: line.lineNumber,
-        description: line.description,
-        brandRequirement: line.brandRequirement,
-        modelRequirement: line.modelRequirement,
-        quantity: line.quantity,
-        unit: line.unit,
-        technicalSpecifications: line.technicalSpecifications,
-      });
+      let candidates: ResearchCandidate[] = [];
+      try {
+        if (preferLiveWeb) {
+          candidates = await liveProvider.search({
+            lineNumber: line.lineNumber,
+            description: line.description,
+            brandRequirement: line.brandRequirement,
+            modelRequirement: line.modelRequirement,
+            quantity: line.quantity,
+            unit: line.unit,
+            technicalSpecifications: line.technicalSpecifications,
+          });
+        }
+      } catch (err) {
+        reasons.push(
+          `Line ${line.lineNumber}: live research isolated failure — ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      const liveCount = candidates.filter((c) => c.priceKnown).length;
+      if (liveCount > 0) linesWithLivePricing += 1;
+
+      if (catalogueFallback && candidates.filter((c) => c.priceKnown).length === 0) {
+        const fallback = await catalogue.search({
+          lineNumber: line.lineNumber,
+          description: line.description,
+          brandRequirement: line.brandRequirement,
+          modelRequirement: line.modelRequirement,
+          quantity: line.quantity,
+          unit: line.unit,
+          technicalSpecifications: line.technicalSpecifications,
+        });
+        candidates = [
+          ...candidates,
+          ...fallback.map((c) => ({
+            ...c,
+            rawEvidence: { ...c.rawEvidence, fallback: "evidence-catalogue" },
+          })),
+        ];
+      }
+
       researchByLine[line.lineNumber] = {
         candidates,
         lineItemId: lineItem.id,
+        liveCount,
       };
     }
+
+    // Persist granular research observations (dedupe by unique key)
+    for (const ev of researchEvents) {
+      try {
+        if (ev.type === "SEARCH_QUERY_GENERATED") {
+          await prisma.researchObservation.create({
+            data: {
+              rfqId: rfq.id,
+              rfqLineItemId: researchByLine[ev.lineNumber]?.lineItemId,
+              eventType: ev.type,
+              queryText: ev.query.query,
+              payloadJson: JSON.stringify(ev.query),
+            },
+          });
+        } else if (
+          ev.type === "PRODUCT_SOURCE_DISCOVERED" ||
+          ev.type === "PRODUCT_PAGE_INSPECTED" ||
+          ev.type === "PRODUCT_PRICE_OBSERVED" ||
+          ev.type === "PRODUCT_SPEC_OBSERVED" ||
+          ev.type === "PRODUCT_CANDIDATE_REJECTED"
+        ) {
+          const url =
+            "hit" in ev
+              ? ev.hit.url
+              : "page" in ev
+                ? ev.page.finalUrl
+                : "url" in ev
+                  ? ev.url
+                  : null;
+          if (!url) continue;
+          const lineItemId = researchByLine[ev.lineNumber]?.lineItemId ?? null;
+          const existing = await prisma.researchObservation.findFirst({
+            where: {
+              rfqId: rfq.id,
+              rfqLineItemId: lineItemId,
+              sourceUrl: url,
+              eventType: ev.type,
+            },
+          });
+          if (existing) {
+            await prisma.researchObservation.update({
+              where: { id: existing.id },
+              data: {
+                payloadJson: JSON.stringify(ev),
+                retrievedAt: new Date(),
+              },
+            });
+          } else {
+            await prisma.researchObservation.create({
+              data: {
+                rfqId: rfq.id,
+                rfqLineItemId: lineItemId,
+                eventType: ev.type,
+                sourceUrl: url,
+                domain: (() => {
+                  try {
+                    return new URL(url).hostname;
+                  } catch {
+                    return null;
+                  }
+                })(),
+                payloadJson: JSON.stringify(ev),
+              },
+            });
+          }
+        }
+      } catch {
+        // Observation persistence must not crash the worker
+      }
+    }
+
+    const webResearchCoverage =
+      normalized.length === 0 ? 0 : linesWithLivePricing / normalized.length;
+    artifacts.webResearchCoverage = webResearchCoverage;
+    artifacts.liveResearch = {
+      events: researchEvents.length,
+      fetchCount: liveProvider.fetchCount,
+      metricsByLine: Object.fromEntries(liveProvider.metricsByLine),
+      coverage: webResearchCoverage,
+    };
     artifacts.research = Object.fromEntries(
       Object.entries(researchByLine).map(([k, v]) => [
         k,
         v.candidates.map((c) => ({
           source: c.sourceName,
           product: c.productName,
+          url: c.productUrl,
           price: c.price,
           evidenceLevel: c.evidenceLevel,
+          provider: c.rawEvidence?.provider ?? "unknown",
         })),
       ]),
+    );
+
+    await writeAuditEvent(
+      {
+        action: "LIVE_RESEARCH_COMPLETED",
+        entityType: "Rfq",
+        entityId: rfq.id,
+        metadata: {
+          lines: Object.keys(researchByLine).length,
+          candidateCount: Object.values(researchByLine).reduce(
+            (s, v) => s + v.candidates.length,
+            0,
+          ),
+          webResearchCoverage,
+          fetches: liveProvider.fetchCount,
+        },
+      },
+      prisma,
     );
     await writeAuditEvent(
       {
@@ -503,6 +690,7 @@ export async function processClaimedRfq(
             (s, v) => s + v.candidates.length,
             0,
           ),
+          preferLiveWeb,
         },
       },
       prisma,
@@ -562,6 +750,15 @@ export async function processClaimedRfq(
           ...match,
         });
 
+        const packCalc = c.rawEvidence?.packCalculation ?? null;
+        const deliveryEv = c.rawEvidence?.delivery ?? null;
+        const sourceQuality =
+          typeof c.rawEvidence?.sourceQuality === "number"
+            ? c.rawEvidence.sourceQuality
+            : c.sourceName.toLowerCase().includes("makro")
+              ? 0.88
+              : 0.55;
+
         const row = await prisma.productResearchCandidate.create({
           data: {
             rfqId: rfq.id,
@@ -591,6 +788,15 @@ export async function processClaimedRfq(
             matchedAttributes: JSON.stringify(match.matchedAttributes),
             missingAttributes: JSON.stringify(match.missingAttributes),
             conflictingAttributes: JSON.stringify(match.conflictingAttributes),
+            attributeComparisonsJson: JSON.stringify(
+              match.attributeComparisons ?? [],
+            ),
+            researchProvider: String(c.rawEvidence?.provider ?? "unknown"),
+            sourceQuality,
+            priceType: String(c.rawEvidence?.priceType ?? null),
+            packCalculationJson: packCalc ? JSON.stringify(packCalc) : null,
+            deliveryJson: deliveryEv ? JSON.stringify(deliveryEv) : null,
+            selectionStatus: "ALTERNATIVE",
           },
         });
         persistedIds.push(row.id);
@@ -604,12 +810,14 @@ export async function processClaimedRfq(
           effectiveUnitCost: c.effectiveUnitCost,
           priceKnown: c.priceKnown,
           availabilityKnown: Boolean(c.availability),
-          packSizeCorrect: true,
+          packSizeCorrect:
+            !packCalc ||
+            (packCalc as { flag?: string }).flag === "OK" ||
+            (packCalc as { flag?: string }).flag === "UNIT_PRICE",
           deliveryKnown: c.deliveryKnown,
-          sourceCredibility: c.sourceName.toLowerCase().includes("makro")
-            ? 0.75
-            : 0.55,
+          sourceCredibility: sourceQuality,
           _candidate: c,
+          _match: match,
         });
       }
 
@@ -623,17 +831,63 @@ export async function processClaimedRfq(
         prisma,
       );
 
-      const selection = selectBestProductCandidate(
-        scoredInputs.map(
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          ({ _candidate, ...rest }) => rest,
-        ),
+      const multi = validateMultiSourcePrices(
+        scoredInputs
+          .filter((s) => s.priceKnown && s.effectiveUnitCost != null)
+          .map((s) => ({
+            id: s.id,
+            price: s.effectiveUnitCost as number,
+            sourceQuality: s.sourceCredibility,
+            matchSelectable: mayAutoSelect(s.matchVerdict),
+            freshnessOk: isUsableForAutonomousPricing(
+              freshnessBand(
+                ageDaysFromRetrieved(
+                  s._candidate.retrievedAt,
+                  new Date(),
+                ),
+              ),
+            ),
+            packResolved: s.packSizeCorrect,
+            flags:
+              s.sourceCredibility < 0.4 ? ["WEAK_SOURCE"] : undefined,
+          })),
+        {
+          highValueLine:
+            (scoredInputs[0]?.effectiveUnitCost ?? 0) * line.quantity >=
+            RESEARCH_POLICY.multiSource.highValueLineThresholdZar,
+        },
       );
-      selectionArtifacts.push({ line: line.lineNumber, ...selection });
+
+      const selection = selectBestProductCandidate(
+        scoredInputs.map((s) => ({
+          id: s.id,
+          matchVerdict: s.matchVerdict,
+          matchConfidence: s.matchConfidence,
+          evidenceLevel: s.evidenceLevel,
+          evidenceAgeHours: s.evidenceAgeHours,
+          effectiveUnitCost: s.effectiveUnitCost,
+          priceKnown: s.priceKnown,
+          availabilityKnown: s.availabilityKnown,
+          packSizeCorrect: s.packSizeCorrect,
+          deliveryKnown: s.deliveryKnown,
+          sourceCredibility: s.sourceCredibility,
+        })),
+      );
+      selectionArtifacts.push({
+        line: line.lineNumber,
+        ...selection,
+        multiSource: multi,
+      });
 
       let selectedCandidate: ResearchCandidate | null = null;
-      let selectedId: string | null = selection.selectedId;
-      // Soft fallback for REVIEW path: pick best price-known non-mismatch for draft numbers
+      let selectedId: string | null =
+        multi.selectedId && mayAutoSelect(
+          scoredInputs.find((s) => s.id === multi.selectedId)?.matchVerdict ??
+            "INSUFFICIENT_INFORMATION",
+        )
+          ? multi.selectedId
+          : selection.selectedId;
+
       if (!selectedId) {
         const soft = scoredInputs
           .filter(
@@ -660,8 +914,38 @@ export async function processClaimedRfq(
       if (selectedId) {
         await prisma.productResearchCandidate.update({
           where: { id: selectedId },
-          data: { selected: true },
+          data: {
+            selected: true,
+            selectionStatus: selection.selectedId === selectedId || multi.selectedId === selectedId
+              ? "SELECTED"
+              : "SELECTED",
+            selectionReason: selection.reason,
+          },
         });
+        for (const alt of multi.alternatives) {
+          await prisma.productResearchCandidate.updateMany({
+            where: { id: alt },
+            data: { selectionStatus: "ALTERNATIVE" },
+          });
+        }
+        for (const rej of multi.rejected) {
+          await prisma.productResearchCandidate.updateMany({
+            where: { id: rej.id },
+            data: {
+              selectionStatus: "REJECTED",
+              selectionReason: rej.reason,
+            },
+          });
+        }
+        await writeAuditEvent(
+          {
+            action: "PRODUCT_CANDIDATE_SELECTED",
+            entityType: "ProductResearchCandidate",
+            entityId: selectedId,
+            metadata: { lineNumber: line.lineNumber, reason: selection.reason },
+          },
+          prisma,
+        );
         await writeAuditEvent(
           {
             action: "PRODUCT_SELECTED",
@@ -671,45 +955,124 @@ export async function processClaimedRfq(
           },
           prisma,
         );
+        await writeAuditEvent(
+          {
+            action: "MULTI_SOURCE_PRICE_VALIDATED",
+            entityType: "Rfq",
+            entityId: rfq.id,
+            metadata: { lineNumber: line.lineNumber, ...multi },
+          },
+          prisma,
+        );
       }
 
       const unitCost = selectedCandidate?.effectiveUnitCost ?? null;
       const priceKnown = Boolean(selectedCandidate?.priceKnown && unitCost != null);
+      const deliveryEv = (selectedCandidate?.rawEvidence?.delivery ?? {
+        type: "UNKNOWN_DELIVERY",
+        amount: null,
+        known: false,
+        notes: [],
+      }) as DeliveryEvidence;
+
       const landed = calculateLineLandedCost({
         tenderQuantity: line.quantity,
         unitCost,
         priceKnown,
-        deliveryKnown: selectedCandidate?.deliveryKnown ?? false,
-        deliveryCost: selectedCandidate?.deliveryCost ?? null,
-        vatTreatmentKnown: selectedCandidate?.vatTreatment !== "UNKNOWN",
+        deliveryKnown: deliveryEv.known === true,
+        deliveryCost: deliveryEv.known ? deliveryEv.amount : null,
+        vatTreatmentKnown:
+          selectedCandidate?.vatTreatment !== "UNKNOWN" &&
+          selectedCandidate?.vatTreatment != null,
         availabilityKnown: Boolean(selectedCandidate?.availability),
+        supplierPackSize: selectedCandidate?.packSize,
+        packPrice:
+          selectedCandidate?.packSize && selectedCandidate.packSize > 1
+            ? selectedCandidate.price
+            : null,
       });
 
       if (landed.flags.includes("PACK_SIZE_AMBIGUITY")) packAmbiguity = true;
-      if (landed.flags.includes("UNKNOWN_DELIVERY_COST")) {
-        // material for guardrails
-      } else if (selectedCandidate?.deliveryKnown) {
+      const deliveryMateriality = assessDeliveryMateriality(
+        landed.productCost || (unitCost ?? 0) * line.quantity,
+        deliveryEv,
+      );
+      if (deliveryEv.known && deliveryEv.amount != null) {
         anyDeliveryKnown = true;
-        deliveryTotal += landed.delivery;
+        deliveryTotal += deliveryEv.amount;
       }
+      await writeAuditEvent(
+        {
+          action: "DELIVERY_EVIDENCE_CAPTURED",
+          entityType: "Rfq",
+          entityId: rfq.id,
+          metadata: {
+            lineNumber: line.lineNumber,
+            delivery: deliveryEv,
+            materiality: deliveryMateriality,
+          },
+        },
+        prisma,
+      );
 
       if (!priceKnown) evidenceWeak = true;
-
       totalProductCost += landed.productCost;
 
       const matchVerdict =
         scoredInputs.find((s) => s.id === selectedId)?.matchVerdict ??
         ("INSUFFICIENT_INFORMATION" as const);
-      const evidenceLevel =
-        selectedCandidate?.evidenceLevel ?? null;
+      const evidenceLevel = selectedCandidate?.evidenceLevel ?? null;
+
+      const lineConf = scoreLineResearchConfidence({
+        specMatch: mayAutoSelect(matchVerdict) ? 0.9 : 0.4,
+        sourceQuality:
+          scoredInputs.find((s) => s.id === selectedId)?.sourceCredibility ?? 0.3,
+        sourceCount: Math.min(1, multi.count / 3),
+        priceConsistency:
+          multi.dispersionCv != null && multi.dispersionCv < 0.25 ? 0.85 : 0.45,
+        vatClarity:
+          selectedCandidate?.vatTreatment &&
+          selectedCandidate.vatTreatment !== "UNKNOWN"
+            ? 0.8
+            : 0.3,
+        packClarity: landed.flags.includes("PACK_SIZE_AMBIGUITY") ? 0.3 : 0.85,
+        availability: selectedCandidate?.availability ? 0.8 : 0.4,
+        deliveryEvidence: deliveryEv.known ? 0.9 : 0.2,
+        freshness: isUsableForAutonomousPricing(
+          freshnessBand(
+            ageDaysFromRetrieved(
+              selectedCandidate?.retrievedAt ?? new Date(0),
+              new Date(),
+            ),
+          ),
+        )
+          ? 0.9
+          : 0.2,
+      });
+
+      const lineFlags = [
+        ...landed.flags,
+        ...multi.flags,
+        ...(deliveryMateriality.band === "MATERIAL"
+          ? ["DELIVERY_MATERIAL_UNKNOWN"]
+          : []),
+      ];
 
       guardrailLines.push({
         lineNumber: line.lineNumber,
-        unresolved: landed.unresolved || !selectedId || !selection.selectedId,
+        unresolved: landed.unresolved || !selectedId || !priceKnown,
         matchVerdict,
         evidenceLevel,
         evidenceAgeHours: selectedCandidate?.evidenceAgeHours ?? null,
-        flags: landed.flags,
+        flags: lineFlags,
+        lineConfidence: lineConf.score,
+        liveEvidence: researchByLine[line.lineNumber].liveCount > 0,
+        multiSource: multi.count >= 2,
+        packResolved: !landed.flags.includes("PACK_SIZE_AMBIGUITY"),
+        vatMaterialUnknown:
+          !selectedCandidate?.vatTreatment ||
+          selectedCandidate.vatTreatment === "UNKNOWN",
+        deliveryMaterialUnknown: deliveryMateriality.band === "MATERIAL",
       });
 
       // Provisional unit sell using 25% — adjusted after aggregate markup
@@ -746,9 +1109,8 @@ export async function processClaimedRfq(
     artifacts.matching = matchArtifacts;
     artifacts.selection = selectionArtifacts;
 
-    // —— PRICING / MARKUP ——
+    // —— PRICING / MARKUP / RISK ALLOWANCE ——
     await transition(prisma, rfq.id, "PRICING");
-    // Existing scenario may carry logistics estimate (marked MANUAL) — treat as logistics with flag
     const prior = rfq.pricingScenarios[0];
     const logisticsFromPrior = prior
       ? toNumber(Number(prior.logisticsCost))
@@ -760,7 +1122,48 @@ export async function processClaimedRfq(
     }
 
     const deliveryForLanded = anyDeliveryKnown ? deliveryTotal : 0;
-    const landedCost = totalProductCost + deliveryForLanded + logisticsFromPrior;
+
+    // Unknown delivery: explicit risk allowance for LOW materiality only — never raise markup
+    let deliveryAllowanceTotal = 0;
+    const materialDeliveryUnknown = guardrailLines.some(
+      (l) => l.deliveryMaterialUnknown,
+    );
+    if (!anyDeliveryKnown && totalProductCost > 0 && !materialDeliveryUnknown) {
+      const allowance = deliveryRiskAllowance(totalProductCost, {
+        type: "UNKNOWN_DELIVERY",
+        amount: null,
+        threshold: null,
+        destinationAssumption: null,
+        source: null,
+        known: false,
+        notes: [],
+      });
+      if (allowance.apply) {
+        deliveryAllowanceTotal = allowance.amount;
+        reasons.push(allowance.reason);
+      }
+    } else if (materialDeliveryUnknown) {
+      reasons.push(
+        "MATERIAL unknown delivery — unresolved delivery component; not buried in markup",
+      );
+    }
+
+    const risk = buildRiskAllowances({
+      deliveryAllowance: deliveryAllowanceTotal,
+      deliveryReason: "Low-materiality unknown delivery allowance (policy)",
+    });
+    artifacts.riskAllowance = risk;
+    if (risk.total > 0) {
+      await writeAuditEvent(
+        {
+          action: "RISK_ALLOWANCE_APPLIED",
+          entityType: "Rfq",
+          entityId: rfq.id,
+          newState: risk,
+        },
+        prisma,
+      );
+    }
 
     const highConfidence =
       guardrailLines.every(
@@ -768,22 +1171,27 @@ export async function processClaimedRfq(
           !l.unresolved &&
           l.matchVerdict &&
           (l.matchVerdict === "EXACT_MATCH" ||
-            l.matchVerdict === "ACCEPTABLE_EQUIVALENT"),
+            l.matchVerdict === "ACCEPTABLE_EQUIVALENT") &&
+          (l.lineConfidence ?? 0) >= RESEARCH_POLICY.autoQuoted.minLineConfidence,
       ) && !evidenceWeak;
 
     const markup = selectMarkupPolicy({
       highConfidence,
+      // deliveryUnknown intentionally ignored by policy V2
       deliveryUnknown: !anyDeliveryKnown,
-      packSizeAmbiguity: packAmbiguity,
-      evidenceWeak,
-      operationalComplexity: logisticsFromPrior > 0 && !anyDeliveryKnown,
+      simpleTransaction: !packAmbiguity,
+      operationalComplexity: false,
     });
     artifacts.markup = markup;
 
-    const commercial = applyMarkupWithMarginDisplay(
-      landedCost,
-      markup.markupPercent,
-    );
+    const commercial = buildLandedBreakdown({
+      productCost: totalProductCost,
+      deliveryCost: deliveryForLanded,
+      riskAllowance: risk.total,
+      otherDirectCost: logisticsFromPrior,
+      markupPercent: markup.markupPercent,
+    });
+    const landedCost = commercial.landedCost;
 
     // Recompute line sells with selected markup
     for (const pl of pricedLines) {
@@ -817,6 +1225,7 @@ export async function processClaimedRfq(
         newState: {
           productCost: totalProductCost,
           delivery: deliveryForLanded,
+          riskAllowance: risk.total,
           logistics: logisticsFromPrior,
           landedCost,
         },
@@ -832,17 +1241,14 @@ export async function processClaimedRfq(
           ...markup,
           markupPercent: commercial.markupPercent,
           grossMarginPercent: commercial.grossMarginPercent,
+          note: "Markup not used to compensate unknown delivery",
         },
       },
       prisma,
     );
 
     artifacts.pricing = {
-      productCost: totalProductCost,
-      delivery: deliveryForLanded,
-      logistics: logisticsFromPrior,
       ...commercial,
-      landedCost,
       lines: pricedLines,
     };
 
@@ -948,6 +1354,10 @@ export async function processClaimedRfq(
         (highConfidence ? 0.15 : 0),
     );
 
+    const lineScores = guardrailLines.map((l) => l.lineConfidence ?? 0);
+    const sourcingConfidence = overallSourcingConfidence(lineScores);
+    const confidenceMerged = Math.min(confidence, sourcingConfidence + 0.15);
+
     const guardrail = classifyAutonomousOutcome({
       eligibility: eligibilityVerdict,
       compulsoryBriefingMissed: briefingMissed,
@@ -955,7 +1365,9 @@ export async function processClaimedRfq(
       mandatoryRequirementUnsatisfied: false,
       tenderValueExceedsThreshold: false,
       lines: guardrailLines,
-      confidence,
+      confidence: confidenceMerged,
+      classificationConfident: classification.confidence >= 0.55,
+      boqComplete: normalized.length > 0,
     });
     artifacts.outcome = guardrail;
     artifacts.guardrails = guardrail;
@@ -963,11 +1375,12 @@ export async function processClaimedRfq(
     return await finalize(prisma, rfq, {
       state: guardrail.state,
       outcome: guardrail.outcome,
-      confidence,
+      confidence: confidenceMerged,
       reasons: [...reasons, ...guardrail.reasons],
       artifacts,
       started,
       quotationNumber,
+      webResearchCoverage,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -1021,6 +1434,7 @@ async function finalize(
     artifacts: RunArtifacts;
     started: number;
     quotationNumber?: string;
+    webResearchCoverage?: number;
   },
 ): Promise<ProcessResult> {
   const outcome = (opts.outcome === "SKIPPED_NOT_SUPPLY"
@@ -1046,6 +1460,10 @@ async function finalize(
         reasons: opts.reasons,
         artifacts: opts.artifacts,
       }),
+      liveResearchMetricsJson: opts.artifacts.liveResearch
+        ? JSON.stringify(opts.artifacts.liveResearch)
+        : null,
+      webResearchCoverage: opts.webResearchCoverage ?? opts.artifacts.webResearchCoverage ?? null,
       // Map to founder-facing pipeline without submitting
       ...(outcome === "AUTO_QUOTED" || outcome === "REVIEW_REQUIRED"
         ? {
@@ -1102,6 +1520,7 @@ async function finalize(
     durationMs,
     reasons: opts.reasons,
     quotationNumber: opts.quotationNumber ?? null,
+    webResearchCoverage: opts.webResearchCoverage ?? null,
   };
 }
 
@@ -1110,7 +1529,11 @@ async function finalize(
  */
 export async function runAutonomousQueue(
   prisma: PrismaClient,
-  opts?: { limit?: number; preferInternalId?: string },
+  opts?: {
+    limit?: number;
+    preferInternalId?: string;
+    processOpts?: ProcessOptions;
+  },
 ): Promise<ProcessResult[]> {
   const limit = opts?.limit ?? 10;
   const results: ProcessResult[] = [];
@@ -1125,7 +1548,12 @@ export async function runAutonomousQueue(
     });
     if (!claim) break;
     try {
-      const result = await processClaimedRfq(prisma, claim.id, claim.claimToken);
+      const result = await processClaimedRfq(
+        prisma,
+        claim.id,
+        claim.claimToken,
+        opts?.processOpts,
+      );
       results.push(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

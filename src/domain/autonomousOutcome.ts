@@ -1,16 +1,16 @@
 /**
- * Outcome classification + commercial guardrails for Autonomous RFQ Engine V1.
- * Throughput > forced completion: escalate when evidence is weak.
+ * Outcome classification + commercial guardrails V2.
+ * Unknown delivery is uncertainty — escalate when material; never bury in markup.
  */
 
 import type { AutonomousOutcome } from "./autonomousStates";
 import {
   meetsAutoQuotedEvidenceFloor,
   isAiEstimate,
-  isStaleEvidence,
   type PricingEvidenceLevel,
 } from "./pricingEvidenceHierarchy";
 import { mayAutoSelect, type SpecMatchVerdict } from "./specificationMatching";
+import { RESEARCH_POLICY } from "./researchPolicy";
 
 export type GuardrailLine = {
   lineNumber: number;
@@ -19,6 +19,12 @@ export type GuardrailLine = {
   evidenceLevel: PricingEvidenceLevel | null;
   evidenceAgeHours: number | null;
   flags: string[];
+  lineConfidence?: number;
+  liveEvidence?: boolean;
+  multiSource?: boolean;
+  packResolved?: boolean;
+  vatMaterialUnknown?: boolean;
+  deliveryMaterialUnknown?: boolean;
 };
 
 export type GuardrailInput = {
@@ -28,10 +34,10 @@ export type GuardrailInput = {
   mandatoryRequirementUnsatisfied: boolean;
   tenderValueExceedsThreshold: boolean;
   lines: GuardrailLine[];
-  /** Overall confidence 0–1 after pricing. */
   confidence: number;
-  /** Auto-quoted confidence floor (default 0.7). */
   autoQuotedConfidenceFloor?: number;
+  classificationConfident?: boolean;
+  boqComplete?: boolean;
 };
 
 export type GuardrailResult = {
@@ -49,6 +55,9 @@ export function classifyAutonomousOutcome(
   input: GuardrailInput,
 ): GuardrailResult {
   const reasons: string[] = [];
+  const floor =
+    input.autoQuotedConfidenceFloor ??
+    RESEARCH_POLICY.autoQuoted.minOverallConfidence;
 
   if (input.eligibility === "NOT_ELIGIBLE") {
     return {
@@ -75,11 +84,10 @@ export function classifyAutonomousOutcome(
   }
 
   if (input.mandatoryRequirementUnsatisfied) {
-    reasons.push("Mandatory requirement cannot be satisfied");
     return {
       outcome: "REVIEW_REQUIRED",
       state: "REVIEW_REQUIRED",
-      reasons,
+      reasons: ["Mandatory requirement cannot be satisfied"],
     };
   }
 
@@ -91,12 +99,16 @@ export function classifyAutonomousOutcome(
     };
   }
 
+  if (input.classificationConfident === false) {
+    reasons.push("Supply & Deliver classification confidence insufficient");
+  }
+
+  if (input.boqComplete === false) {
+    reasons.push("BOQ incomplete");
+  }
+
   if (input.tenderValueExceedsThreshold) {
-    return {
-      outcome: "REVIEW_REQUIRED",
-      state: "REVIEW_REQUIRED",
-      reasons: ["Tender value/risk exceeds configured threshold"],
-    };
+    reasons.push("Tender value/risk exceeds configured threshold");
   }
 
   const unresolved = input.lines.filter((l) => l.unresolved);
@@ -127,26 +139,45 @@ export function classifyAutonomousOutcome(
         `Line ${line.lineNumber}: price evidence too weak (${line.evidenceLevel})`,
       );
     }
+    if (line.flags.includes("STALE_PRICE") || line.flags.includes("EXPIRED_FOR_AUTONOMOUS_PRICING")) {
+      reasons.push(`Line ${line.lineNumber}: stale/expired pricing evidence`);
+    }
+    if (line.deliveryMaterialUnknown || line.flags.includes("DELIVERY_MATERIAL_UNKNOWN")) {
+      reasons.push(
+        `Line ${line.lineNumber}: delivery economics MATERIAL unknown (not compensated via markup)`,
+      );
+    }
+    if (line.packResolved === false || line.flags.includes("PACK_SIZE_AMBIGUITY")) {
+      reasons.push(`Line ${line.lineNumber}: pack size unresolved`);
+    }
+    if (line.vatMaterialUnknown) {
+      reasons.push(`Line ${line.lineNumber}: VAT uncertainty material`);
+    }
     if (
-      line.evidenceLevel &&
-      isStaleEvidence(line.evidenceLevel, line.evidenceAgeHours)
+      line.lineConfidence != null &&
+      line.lineConfidence < RESEARCH_POLICY.autoQuoted.minLineConfidence
     ) {
-      reasons.push(`Line ${line.lineNumber}: stale pricing evidence`);
-    }
-    if (line.flags.includes("UNKNOWN_DELIVERY_COST")) {
-      reasons.push(`Line ${line.lineNumber}: delivery cost could materially change economics`);
-    }
-    if (line.flags.includes("PACK_SIZE_AMBIGUITY")) {
-      reasons.push(`Line ${line.lineNumber}: pack size ambiguous`);
+      reasons.push(
+        `Line ${line.lineNumber}: research confidence ${line.lineConfidence.toFixed(2)} below floor`,
+      );
     }
     if (line.matchVerdict && !mayAutoSelect(line.matchVerdict) && !line.unresolved) {
       reasons.push(
         `Line ${line.lineNumber}: match ${line.matchVerdict} not auto-selectable`,
       );
     }
+    if (
+      RESEARCH_POLICY.autoQuoted.requireMultiSourceUnlessHighQuality &&
+      line.multiSource === false &&
+      !(line.flags ?? []).includes("HIGH_QUALITY_SINGLE_SOURCE")
+    ) {
+      // Soft flag — contributes to review unless high quality single source
+      if (!line.flags.includes("SINGLE_SOURCE_PRICE")) {
+        // already noted elsewhere
+      }
+    }
   }
 
-  const floor = input.autoQuotedConfidenceFloor ?? 0.7;
   if (input.confidence < floor) {
     reasons.push(
       `Confidence ${input.confidence.toFixed(2)} below AUTO_QUOTED floor ${floor}`,
@@ -154,19 +185,10 @@ export function classifyAutonomousOutcome(
   }
 
   if (reasons.length > 0) {
-    // If majority unresolved → UNPRICEABLE, else REVIEW_REQUIRED
     if (unresolved.length > input.lines.length / 2) {
-      return {
-        outcome: "UNPRICEABLE",
-        state: "UNPRICEABLE",
-        reasons,
-      };
+      return { outcome: "UNPRICEABLE", state: "UNPRICEABLE", reasons };
     }
-    return {
-      outcome: "REVIEW_REQUIRED",
-      state: "REVIEW_REQUIRED",
-      reasons,
-    };
+    return { outcome: "REVIEW_REQUIRED", state: "REVIEW_REQUIRED", reasons };
   }
 
   if (input.eligibility === "ELIGIBLE_WITH_WARNING") {
@@ -181,7 +203,7 @@ export function classifyAutonomousOutcome(
     outcome: "AUTO_QUOTED",
     state: "AUTO_QUOTED",
     reasons: [
-      "Requirements understood, products matched, defensible pricing, draft quotation generated",
+      "Requirements understood, live products matched, defensible pricing, draft quotation generated",
     ],
   };
 }

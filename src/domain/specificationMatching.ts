@@ -26,6 +26,14 @@ export type SpecMatchInput = {
   candidateSpecText?: string | null;
 };
 
+export type AttributeComparison = {
+  attribute: string;
+  required: string | null;
+  observed: string | null;
+  result: "MATCH" | "ACCEPTABLE" | "CONFLICT" | "MISSING" | "NOT_REQUIRED";
+  source: string;
+};
+
 export type SpecMatchResult = {
   verdict: SpecMatchVerdict;
   confidence: number;
@@ -36,6 +44,7 @@ export type SpecMatchResult = {
   evidence: string[];
   /** True only for EXACT_MATCH / ACCEPTABLE_EQUIVALENT. */
   selectableAutomatically: boolean;
+  attributeComparisons?: AttributeComparison[];
 };
 
 const SIZE_RE =
@@ -63,14 +72,17 @@ function extractSizes(text: string): string[] {
 
 /**
  * Compare tender specification against a candidate product.
+ * Never infer compliance merely from title similarity.
  * MISMATCH must never be selected. INSUFFICIENT_INFORMATION is not
- * auto-selected unless policy explicitly permits (V1: does not).
+ * auto-selected unless policy explicitly permits (V1/V2: does not).
  */
 export function matchSpecification(input: SpecMatchInput): SpecMatchResult {
   const matched: string[] = [];
   const missing: string[] = [];
   const conflicting: string[] = [];
   const evidence: string[] = [];
+  const attributeComparisons: AttributeComparison[] = [];
+  const source = "candidate_product_page_or_listing";
 
   const requiredBlob = [
     input.requiredDescription,
@@ -85,16 +97,37 @@ export function matchSpecification(input: SpecMatchInput): SpecMatchResult {
   const reqSizes = extractSizes(requiredBlob);
   const candSizes = extractSizes(candidateBlob);
   for (const s of reqSizes) {
-    if (candSizes.includes(s)) matched.push(`size:${s}`);
-    else {
-      // Soft mismatch on size when candidate has a conflicting size
+    if (candSizes.includes(s)) {
+      matched.push(`size:${s}`);
+      attributeComparisons.push({
+        attribute: "size",
+        required: s,
+        observed: s,
+        result: "MATCH",
+        source,
+      });
+    } else {
       const sameUnit = candSizes.find(
         (c) => c.replace(/[\d.]+/, "") === s.replace(/[\d.]+/, ""),
       );
       if (sameUnit && sameUnit !== s) {
         conflicting.push(`size:${s} vs ${sameUnit}`);
+        attributeComparisons.push({
+          attribute: "size",
+          required: s,
+          observed: sameUnit,
+          result: "CONFLICT",
+          source,
+        });
       } else {
         missing.push(`size:${s}`);
+        attributeComparisons.push({
+          attribute: "size",
+          required: s,
+          observed: candSizes[0] ?? null,
+          result: "MISSING",
+          source,
+        });
       }
     }
   }
@@ -107,12 +140,41 @@ export function matchSpecification(input: SpecMatchInput): SpecMatchResult {
       candidateBlob.toLowerCase().includes(reqBrand)
     ) {
       matched.push(`brand:${reqBrand}`);
+      attributeComparisons.push({
+        attribute: "brand",
+        required: reqBrand,
+        observed: candBrand || reqBrand,
+        result: "MATCH",
+        source,
+      });
     } else if (!input.equivalentAllowed) {
       conflicting.push(`brand:required ${reqBrand}, offered ${candBrand || "none"}`);
+      attributeComparisons.push({
+        attribute: "brand",
+        required: reqBrand,
+        observed: candBrand || null,
+        result: "CONFLICT",
+        source,
+      });
     } else {
       missing.push(`brand:${reqBrand}`);
       evidence.push("Brand equivalent permitted — brand gap noted");
+      attributeComparisons.push({
+        attribute: "brand",
+        required: reqBrand,
+        observed: candBrand || null,
+        result: "ACCEPTABLE",
+        source,
+      });
     }
+  } else {
+    attributeComparisons.push({
+      attribute: "brand",
+      required: null,
+      observed: candBrand || null,
+      result: "NOT_REQUIRED",
+      source,
+    });
   }
 
   const reqModel = (input.requiredModel ?? "").trim().toLowerCase();
@@ -123,8 +185,38 @@ export function matchSpecification(input: SpecMatchInput): SpecMatchResult {
       candidateBlob.toLowerCase().includes(reqModel)
     ) {
       matched.push(`model:${reqModel}`);
+      attributeComparisons.push({
+        attribute: "model",
+        required: reqModel,
+        observed: candModel || reqModel,
+        result: "MATCH",
+        source,
+      });
     } else {
       missing.push(`model:${reqModel}`);
+      attributeComparisons.push({
+        attribute: "model",
+        required: reqModel,
+        observed: candModel || null,
+        result: "MISSING",
+        source,
+      });
+    }
+  }
+
+  // Chemistry / voltage extras when present in tender text
+  for (const attr of ["alkaline", "1.5v", "1.5 volt"] as const) {
+    if (requiredBlob.toLowerCase().includes(attr.replace(" ", ""))) {
+      const obs = candidateBlob.toLowerCase().includes(attr.replace(" ", "")) ||
+        candidateBlob.toLowerCase().includes(attr);
+      attributeComparisons.push({
+        attribute: attr.includes("1.5") ? "voltage" : "chemistry",
+        required: attr,
+        observed: obs ? attr : null,
+        result: obs ? "MATCH" : "MISSING",
+        source,
+      });
+      if (obs) matched.push(attr.includes("1.5") ? "voltage:1.5v" : "chemistry:alkaline");
     }
   }
 
@@ -137,32 +229,34 @@ export function matchSpecification(input: SpecMatchInput): SpecMatchResult {
     reqTokens.length === 0 ? 0 : tokenHits.length / reqTokens.length;
   if (tokenHits.length) {
     evidence.push(
-      `Token overlap ${tokenHits.length}/${reqTokens.length} (${(tokenRatio * 100).toFixed(0)}%)`,
+      `Token overlap ${tokenHits.length}/${reqTokens.length} (${(tokenRatio * 100).toFixed(0)}%) — not sufficient alone`,
     );
   }
 
+  const base = {
+    matchedAttributes: matched,
+    missingAttributes: missing,
+    conflictingAttributes: conflicting,
+    evidence,
+    attributeComparisons,
+  };
+
   if (conflicting.length > 0 && !input.equivalentAllowed) {
     return {
+      ...base,
       verdict: "MISMATCH",
       confidence: 0.85,
-      matchedAttributes: matched,
-      missingAttributes: missing,
-      conflictingAttributes: conflicting,
       reasoning: `Conflicting mandatory attributes: ${conflicting.join("; ")}`,
-      evidence,
       selectableAutomatically: false,
     };
   }
 
   if (conflicting.some((c) => c.startsWith("size:"))) {
     return {
+      ...base,
       verdict: "MISMATCH",
       confidence: 0.8,
-      matchedAttributes: matched,
-      missingAttributes: missing,
-      conflictingAttributes: conflicting,
       reasoning: "Size/specification conflict with tender requirement",
-      evidence,
       selectableAutomatically: false,
     };
   }
@@ -171,29 +265,25 @@ export function matchSpecification(input: SpecMatchInput): SpecMatchResult {
     (m) => m.startsWith("brand:") || m.startsWith("model:") || m.startsWith("size:"),
   );
 
+  // Title similarity alone is insufficient
   if (tokenRatio < 0.25 && matched.length === 0) {
     return {
+      ...base,
       verdict: "INSUFFICIENT_INFORMATION",
       confidence: 0.3,
-      matchedAttributes: matched,
       missingAttributes: missing.length ? missing : ["core description tokens"],
-      conflictingAttributes: conflicting,
       reasoning:
-        "Insufficient overlapping specification evidence — do not auto-select",
-      evidence,
+        "Insufficient attribute evidence — title similarity alone is not compliance",
       selectableAutomatically: false,
     };
   }
 
   if (reqBrand && conflicting.some((c) => c.startsWith("brand:"))) {
     return {
+      ...base,
       verdict: "MISMATCH",
       confidence: 0.9,
-      matchedAttributes: matched,
-      missingAttributes: missing,
-      conflictingAttributes: conflicting,
       reasoning: "Required brand not satisfied and equivalents not allowed",
-      evidence,
       selectableAutomatically: false,
     };
   }
@@ -202,30 +292,25 @@ export function matchSpecification(input: SpecMatchInput): SpecMatchResult {
     reqBrand &&
     !matched.some((m) => m.startsWith("brand:")) &&
     input.equivalentAllowed &&
-    tokenRatio >= 0.5
+    tokenRatio >= 0.5 &&
+    matched.length > 0
   ) {
     return {
+      ...base,
       verdict: "ACCEPTABLE_EQUIVALENT",
       confidence: 0.65,
-      matchedAttributes: matched,
-      missingAttributes: missing,
-      conflictingAttributes: conflicting,
       reasoning:
-        "Equivalent allowed; core attributes align without exact brand match",
-      evidence,
+        "Equivalent allowed; observed attributes align without exact brand match",
       selectableAutomatically: true,
     };
   }
 
-  if (criticalMissing.length > 0 && tokenRatio < 0.7) {
+  if (criticalMissing.length > 0 && matched.length < 2) {
     return {
+      ...base,
       verdict: "INSUFFICIENT_INFORMATION",
       confidence: 0.45,
-      matchedAttributes: matched,
-      missingAttributes: missing,
-      conflictingAttributes: conflicting,
       reasoning: `Missing critical attributes: ${criticalMissing.join(", ")}`,
-      evidence,
       selectableAutomatically: false,
     };
   }
@@ -233,41 +318,33 @@ export function matchSpecification(input: SpecMatchInput): SpecMatchResult {
   if (
     (reqBrand ? matched.some((m) => m.startsWith("brand:")) : true) &&
     (reqSizes.length === 0 || matched.some((m) => m.startsWith("size:"))) &&
-    tokenRatio >= 0.7
+    matched.length >= Math.max(1, Math.min(2, reqSizes.length + (reqBrand ? 1 : 0)))
   ) {
     return {
+      ...base,
       verdict: "EXACT_MATCH",
-      confidence: Math.min(0.95, 0.7 + tokenRatio * 0.25),
-      matchedAttributes: matched,
-      missingAttributes: missing,
-      conflictingAttributes: conflicting,
-      reasoning: "Required attributes and description tokens align",
-      evidence,
+      confidence: Math.min(0.95, 0.7 + matched.length * 0.05),
+      reasoning: "Required material attributes observed on product evidence",
       selectableAutomatically: true,
     };
   }
 
   if (tokenRatio >= 0.45 || matched.length > 0) {
     return {
+      ...base,
       verdict: "POSSIBLE_MATCH",
       confidence: 0.5,
-      matchedAttributes: matched,
-      missingAttributes: missing,
-      conflictingAttributes: conflicting,
       reasoning: "Partial match — requires human review before selection",
-      evidence,
       selectableAutomatically: false,
     };
   }
 
   return {
+    ...base,
     verdict: "INSUFFICIENT_INFORMATION",
     confidence: 0.35,
-    matchedAttributes: matched,
     missingAttributes: missing.length ? missing : ["specification detail"],
-    conflictingAttributes: conflicting,
     reasoning: "Cannot confirm compliance from available candidate data",
-    evidence,
     selectableAutomatically: false,
   };
 }
