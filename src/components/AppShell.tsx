@@ -5,6 +5,7 @@ import type { SessionUser } from "@/lib/auth/session";
 const NAV = [
   { href: "/", label: "Operations" },
   { href: "/opportunities", label: "Opportunity Inbox" },
+  { href: "/autonomous", label: "Autonomous Engine" },
   { href: "/founder-queue", label: "Founder Queue" },
   { href: "/rfqs", label: "BID Workspaces" },
   { href: "/companies", label: "Companies" },

@@ -136,6 +136,22 @@ enum AuditAction {
   GOVERNMENT_SUBMIT_BLOCKED
   CAPITAL_LIMIT_FLAGGED
   FOUNDER_OVERRIDE
+  AUTONOMOUS_PROCESSING_STARTED
+  RFQ_DOCUMENTS_ANALYSED
+  BOQ_NORMALIZED
+  PRODUCT_RESEARCH_COMPLETED
+  PRODUCT_MATCH_EVALUATED
+  PRODUCT_SELECTED
+  PRICING_EVIDENCE_CAPTURED
+  LANDED_COST_CALCULATED
+  MARKUP_POLICY_APPLIED
+  QUOTATION_GENERATED
+  RFQ_AUTO_QUOTED
+  RFQ_REVIEW_REQUIRED
+  RFQ_UNPRICEABLE
+  RFQ_INELIGIBLE
+  AUTONOMOUS_PROCESSING_FAILED
+  AUTONOMOUS_PROCESSING_COMPLETED
 }
 
 enum OpportunityClass {
@@ -145,7 +161,64 @@ enum OpportunityClass {
   CONSULTING
   TRAINING
   ICT
+  MIXED
+  UNKNOWN
   OTHER
+}
+
+enum AutonomousProcessingState {
+  DISCOVERED
+  CLASSIFYING
+  NOT_SUPPLY_AND_DELIVER
+  INGESTING_DOCUMENTS
+  ANALYSING_REQUIREMENTS
+  ELIGIBILITY_CHECK
+  BOQ_EXTRACTION
+  PRODUCT_RESEARCH
+  PRODUCT_MATCHING
+  PRICING
+  QUOTATION_GENERATION
+  COMPLIANCE_CHECK
+  AUTO_QUOTED
+  REVIEW_REQUIRED
+  UNPRICEABLE
+  INELIGIBLE
+  FAILED
+  COMPLETED
+}
+
+enum AutonomousOutcome {
+  AUTO_QUOTED
+  REVIEW_REQUIRED
+  UNPRICEABLE
+  INELIGIBLE
+  FAILED
+  SKIPPED_NOT_SUPPLY
+}
+
+enum PricingEvidenceLevel {
+  FORMAL_SUPPLIER_QUOTE
+  SUPPLIER_API_PRICE
+  DISTRIBUTOR_WEB_PRICE
+  WHOLESALER_WEB_PRICE
+  RETAIL_WEB_PRICE
+  HISTORICAL_VERIFIED_PRICE
+  PUBLIC_PRICE_REFERENCE
+  AI_ESTIMATE
+}
+
+enum SpecMatchVerdict {
+  EXACT_MATCH
+  ACCEPTABLE_EQUIVALENT
+  POSSIBLE_MATCH
+  MISMATCH
+  INSUFFICIENT_INFORMATION
+}
+
+enum MarkupRiskBand {
+  LOW_RISK
+  NORMAL
+  HIGHER_OPERATIONAL_OR_PRICING_RISK
 }
 
 enum ClassificationSource {
@@ -642,6 +715,20 @@ model Rfq {
   eligibilityWarningAcceptedAt DateTime?
   eligibilityWarningAcceptedBy String?
   pricingBasis          PricingBasis       @default(PROVISIONAL)
+  /// Autonomous RFQ Engine V1 lifecycle (prep only — never submission).
+  autonomousState       AutonomousProcessingState?
+  autonomousOutcome     AutonomousOutcome?
+  autonomousStartedAt   DateTime?
+  autonomousCompletedAt DateTime?
+  autonomousDurationMs  Int?
+  autonomousFailureReason String?
+  autonomousRetryCount  Int                @default(0)
+  autonomousConfidence  Float?
+  autonomousWorkerVersion String?
+  autonomousLastStep    String?
+  autonomousClaimToken  String?
+  autonomousClaimExpiresAt DateTime?
+  autonomousRunJson     String?
   createdAt             DateTime           @default(now())
   updatedAt             DateTime           @updatedAt
 
@@ -659,6 +746,8 @@ model Rfq {
   enquiries       SupplierEnquiry[]
   emails          EmailMessage[]
   sourcingRequests SourcingRequest[]
+  productResearchCandidates ProductResearchCandidate[]
+  autonomousQuotations AutonomousQuotation[]
 
   @@unique([source, sourceOpportunityId])
   @@index([status])
@@ -670,6 +759,9 @@ model Rfq {
   @@index([duplicateGroupId])
   @@index([inFounderBidQueue])
   @@index([dataMode])
+  @@index([autonomousState])
+  @@index([autonomousOutcome])
+  @@index([autonomousClaimExpiresAt])
 }
 
 model RfqLineItem {
@@ -702,8 +794,83 @@ model RfqLineItem {
   sourceDocument    RfqDocument?         @relation(fields: [sourceDocumentId], references: [id])
   quoteLineItems    SupplierQuoteLineItem[]
   pricingLineItems  PricingLineItem[]
+  researchCandidates ProductResearchCandidate[]
 
   @@index([rfqId])
+}
+
+model ProductResearchCandidate {
+  id                String               @id @default(cuid())
+  rfqId             String
+  rfqLineItemId     String
+  sourceName        String
+  sourceType        String
+  productName       String
+  brand             String?
+  modelSku          String?
+  productUrl        String?
+  price             Decimal?
+  priceKnown        Boolean              @default(false)
+  vatTreatment      String?
+  packSize          Decimal?
+  packUnit          String?
+  effectiveUnitCost Decimal?
+  availability      String?
+  deliveryCost      Decimal?
+  deliveryKnown     Boolean              @default(false)
+  evidenceLevel     PricingEvidenceLevel @default(PUBLIC_PRICE_REFERENCE)
+  retrievedAt       DateTime             @default(now())
+  evidenceAgeHours  Float?
+  rawEvidenceJson   String?
+  matchVerdict      SpecMatchVerdict     @default(INSUFFICIENT_INFORMATION)
+  matchConfidence   Float?
+  matchReasoning    String?
+  matchedAttributes String?
+  missingAttributes String?
+  conflictingAttributes String?
+  selected          Boolean              @default(false)
+  unresolved        Boolean              @default(false)
+  notes             String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  rfq         Rfq         @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  rfqLineItem RfqLineItem @relation(fields: [rfqLineItemId], references: [id], onDelete: Cascade)
+
+  @@index([rfqId])
+  @@index([rfqLineItemId])
+  @@index([selected])
+}
+
+model AutonomousQuotation {
+  id                String   @id @default(cuid())
+  rfqId             String
+  quotationNumber   String
+  companyLegalName  String
+  companyId         String?
+  institution       String
+  rfqReference      String?
+  quotationDate     DateTime @default(now())
+  validityDays      Int?
+  validityUntil     DateTime?
+  currency          String   @default("ZAR")
+  linesJson         String
+  subtotalExVat     Decimal
+  vatAmount         Decimal  @default(0)
+  deliveryAmount    Decimal  @default(0)
+  totalAmount       Decimal
+  vatRegistered     Boolean
+  commercialNotes   String?
+  /// Customer-facing body only — never includes cost/markup/margin/URLs/confidence.
+  customerFacingJson String
+  internalSnapshotJson String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  rfq Rfq @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+
+  @@index([rfqId])
+  @@index([quotationNumber])
 }
 
 model RfqRequirement {
@@ -1200,6 +1367,10 @@ model SystemSettings {
   certificationPassedAt     DateTime?
   autonomyAuthorisedAt      DateTime?
   autonomyAuthorisedBy      String?
+  /// V1: autonomous RFQ preparation (classify→quote draft). Never submission.
+  autonomousPrepEnabled     Boolean      @default(true)
+  /// HARD OFF — V1 must never auto-submit tenders.
+  autonomousSubmissionEnabled Boolean    @default(false)
   maxEmailsPerHour          Int          @default(10)
   maxEmailsPerDay           Int          @default(40)
   maxEmailsPerSupplierPerDay Int         @default(2)

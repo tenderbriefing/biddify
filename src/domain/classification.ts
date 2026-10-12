@@ -5,6 +5,8 @@ export const OPPORTUNITY_CLASSES = [
   "CONSULTING",
   "TRAINING",
   "ICT",
+  "MIXED",
+  "UNKNOWN",
   "OTHER",
 ] as const;
 
