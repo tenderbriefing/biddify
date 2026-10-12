@@ -16,7 +16,8 @@ import {
   StatusBadge,
   VatBadge,
 } from "@/components/StatusBadge";
-
+import { QualificationPanel } from "@/components/QualificationPanel";
+import { formatClosingDisplay } from "@/domain/deadlineParse";
 
 const TABS = [
   "overview",
@@ -89,6 +90,9 @@ export default async function RfqWorkspacePage({
               ← RFQs
             </Link>
             {rfq.isDemo && <DemoBadge />}
+            {rfq.isRealSource && (
+              <span className="badge badge-green">REAL SOURCE</span>
+            )}
           </div>
           <h1 className="text-2xl font-bold tracking-tight">{rfq.title}</h1>
           <div className="muted mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm">
@@ -98,34 +102,44 @@ export default async function RfqWorkspacePage({
             <span>{rfq.tenderNumber ?? "No tender number"}</span>
             <span>{rfq.buyer}</span>
             <span>{rfq.province ?? "—"}</span>
+            {rfq.classification && (
+              <span className="badge badge-slate">
+                {rfq.classification.replaceAll("_", " ")}
+              </span>
+            )}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={rfq.status} />
-          <GateBadge gate={rfq.profitabilityGate} />
+          <GateBadge gate={rfq.qualificationGate} />
           <DeadlineBadge warning={deadline.warning} />
           <span className="mono text-sm">{deadline.label}</span>
         </div>
       </div>
 
       <div className="panel panel-body grid gap-3 md:grid-cols-4">
-        <Fact label="Closing" value={formatDateTime(rfq.closingAt, rfq.timezone)} />
+        <Fact
+          label="Closing"
+          value={formatClosingDisplay(
+            rfq.closingAt,
+            rfq.closingTimeKnown,
+            rfq.timezone,
+          )}
+        />
         <Fact label="Submission" value={rfq.submissionMethod} />
         <Fact
-          label="Company"
+          label="Compulsory briefing"
           value={
-            rfq.selectedCompany
-              ? rfq.selectedCompany.tradingName ?? rfq.selectedCompany.legalName
-              : "Unassigned"
+            !rfq.briefingCompulsoryKnown
+              ? "UNKNOWN — check documents"
+              : rfq.briefingCompulsory
+                ? `YES${rfq.briefingDate ? ` · ${formatDateTime(rfq.briefingDate, rfq.timezone)}` : ""}`
+                : "NO / not indicated"
           }
         />
         <Fact
-          label="VAT (company)"
-          value={
-            rfq.selectedCompany
-              ? vatLabel(rfq.selectedCompany.vatRegistered)
-              : "Company not selected"
-          }
+          label="Next action"
+          value={rfq.nextAction?.replaceAll("_", " ") ?? "—"}
         />
       </div>
 
@@ -150,85 +164,148 @@ export default async function RfqWorkspacePage({
 
       {tab === "overview" && (
         <div className="grid gap-3 lg:grid-cols-2">
-          <div className="panel">
-            <div className="panel-header">Overview</div>
-            <div className="panel-body space-y-2 text-sm">
-              <p>{rfq.description ?? "No description captured."}</p>
-              <FactRow label="Category" value={rfq.category} />
-              <FactRow label="Delivery address" value={rfq.deliveryAddress} />
-              <FactRow label="Delivery period" value={rfq.deliveryPeriod} />
-              <FactRow label="Payment terms" value={rfq.paymentTerms} />
-              <FactRow label="Source" value={`${rfq.source}${rfq.sourceReference ? ` · ${rfq.sourceReference}` : ""}`} />
-              <FactRow
-                label="Opportunity score"
-                value={
-                  rfq.opportunityScore != null
-                    ? `${rfq.opportunityScore} — ${rfq.opportunityScoreNotes ?? ""}`
-                    : "—"
-                }
-              />
-              {rfq.noBidReason && (
-                <FactRow label="No-bid reason" value={rfq.noBidReason} />
-              )}
+          <div className="space-y-3">
+            <div className="panel">
+              <div className="panel-header">What is this opportunity?</div>
+              <div className="panel-body space-y-2 text-sm">
+                <FactRow label="What" value={rfq.title} />
+                <FactRow label="Who is buying" value={rfq.buyer} />
+                <FactRow
+                  label="What they want"
+                  value={rfq.description ?? "See source documents"}
+                />
+                <FactRow
+                  label="When it closes"
+                  value={formatClosingDisplay(
+                    rfq.closingAt,
+                    rfq.closingTimeKnown,
+                    rfq.timezone,
+                  )}
+                />
+                <FactRow label="How to submit" value={rfq.submissionMethod} />
+                <FactRow
+                  label="Compulsory briefing"
+                  value={
+                    !rfq.briefingCompulsoryKnown
+                      ? "UNKNOWN"
+                      : rfq.briefingCompulsory
+                        ? "YES"
+                        : "NO / not indicated"
+                  }
+                />
+                <FactRow
+                  label="Bidding company"
+                  value={
+                    rfq.selectedCompany
+                      ? rfq.selectedCompany.tradingName ??
+                        rfq.selectedCompany.legalName
+                      : "Unassigned — select before sourcing"
+                  }
+                />
+                <FactRow
+                  label="Blocking us"
+                  value={
+                    rfq.status === "NO_BID"
+                      ? rfq.noBidReason
+                      : compliance.submissionReady
+                        ? rfq.nextActionReason ?? "None flagged"
+                        : `${compliance.blockingItems.length} compliance item(s) · ${rfq.nextActionReason ?? ""}`
+                  }
+                />
+                {rfq.duplicateGroupId && (
+                  <FactRow
+                    label="Duplicate group"
+                    value="Linked probable duplicate detected — do not auto-bid multiple companies"
+                  />
+                )}
+              </div>
+            </div>
+
+            <div className="panel">
+              <div className="panel-header">Source provenance</div>
+              <div className="panel-body space-y-2 text-sm">
+                <FactRow label="Source" value={rfq.source} />
+                <FactRow label="Source ID" value={rfq.sourceOpportunityId} />
+                <FactRow label="OCID" value={rfq.ocid} />
+                <FactRow
+                  label="Source URL"
+                  value={rfq.sourceUrl}
+                />
+                <FactRow
+                  label="Published"
+                  value={formatDateTime(rfq.sourcePublishedAt ?? rfq.publicationDate, rfq.timezone)}
+                />
+                <FactRow
+                  label="Source last modified"
+                  value={formatDateTime(rfq.sourceLastModifiedAt, rfq.timezone)}
+                />
+                <FactRow
+                  label="Imported at"
+                  value={formatDateTime(rfq.importedAt, rfq.timezone)}
+                />
+                <FactRow
+                  label="Data class"
+                  value={rfq.isRealSource ? "REAL SOURCE" : rfq.isDemo ? "DEMO" : "INTERNAL"}
+                />
+                {rfq.opportunityScore != null && (
+                  <FactRow
+                    label="Opportunity score"
+                    value={`${rfq.opportunityScore} — transparent component score (see Activity/notes)`}
+                  />
+                )}
+              </div>
             </div>
           </div>
-          <div className="panel">
-            <div className="panel-header">Commercial snapshot</div>
-            <div className="panel-body space-y-2 text-sm">
-              {selectedPricing ? (
-                <>
-                  <FactRow
-                    label="Landed cost"
-                    value={formatZar(Number(selectedPricing.landedCost))}
-                  />
-                  <FactRow
-                    label="Markup"
-                    value={formatPercent(Number(selectedPricing.markupPercent))}
-                  />
-                  <FactRow
-                    label="Selling (ex VAT)"
-                    value={formatZar(Number(selectedPricing.sellingPriceExVat))}
-                  />
-                  <FactRow
-                    label="VAT amount"
-                    value={formatZar(Number(selectedPricing.vatAmount))}
-                  />
-                  <FactRow
-                    label="Total quotation"
-                    value={formatZar(Number(selectedPricing.totalQuotation))}
-                  />
-                  <FactRow
-                    label="Gross profit"
-                    value={formatZar(Number(selectedPricing.grossProfit))}
-                  />
-                  <FactRow
-                    label="Gross margin"
-                    value={formatPercent(Number(selectedPricing.grossMarginPercent))}
-                  />
-                  <FactRow
-                    label="Working capital"
-                    value={formatZar(Number(selectedPricing.workingCapitalRequired))}
-                  />
-                  {selectedPricing.vatRegisteredSnapshot != null && (
-                    <div className="pt-1">
+
+          <div className="space-y-3">
+            <QualificationPanel
+              rfqId={rfq.id}
+              classification={rfq.classification}
+              classificationConfidence={rfq.classificationConfidence}
+              classificationReasoning={rfq.classificationReasoning}
+              qualificationGate={rfq.qualificationGate}
+              qualificationReasons={rfq.qualificationReasons}
+              nextAction={rfq.nextAction}
+              nextActionReason={rfq.nextActionReason}
+              status={rfq.status}
+            />
+
+            <div className="panel">
+              <div className="panel-header">Commercial snapshot</div>
+              <div className="panel-body space-y-2 text-sm">
+                {selectedPricing ? (
+                  <>
+                    <FactRow
+                      label="Landed cost"
+                      value={formatZar(Number(selectedPricing.landedCost))}
+                    />
+                    <FactRow
+                      label="Gross profit"
+                      value={formatZar(Number(selectedPricing.grossProfit))}
+                    />
+                    <FactRow
+                      label="Gross margin"
+                      value={formatPercent(Number(selectedPricing.grossMarginPercent))}
+                    />
+                    {selectedPricing.vatRegisteredSnapshot != null && (
                       <VatBadge
                         vatRegistered={selectedPricing.vatRegisteredSnapshot}
                       />
-                    </div>
-                  )}
-                </>
-              ) : (
-                <p className="muted">No pricing scenario yet.</p>
-              )}
-              <div className="mt-3 border-t border-[var(--border)] pt-3">
-                <FactRow
-                  label="Compliance gate"
-                  value={
-                    compliance.submissionReady
-                      ? "Submission ready"
-                      : `${compliance.blockingItems.length} blocking item(s)`
-                  }
-                />
+                    )}
+                  </>
+                ) : (
+                  <p className="muted">
+                    No supplier pricing yet — commercial margin not heavily scored.
+                  </p>
+                )}
+                {rfq.selectedCompany && (
+                  <div className="pt-2">
+                    <VatBadge vatRegistered={rfq.selectedCompany.vatRegistered} />
+                    <span className="muted ml-2 text-xs">
+                      {vatLabel(rfq.selectedCompany.vatRegistered)}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           </div>

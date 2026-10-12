@@ -1,5 +1,5 @@
-import type { AuditAction, Prisma } from "@prisma/client";
-import { prisma } from "@/lib/db";
+import type { AuditAction, Prisma, PrismaClient } from "@prisma/client";
+import { prisma as defaultPrisma } from "@/lib/db";
 
 export type AuditInput = {
   action: AuditAction;
@@ -19,7 +19,10 @@ function serialize(value: unknown): string | null {
 /**
  * Append-only audit trail. Do not update/delete audit rows in application code.
  */
-export async function writeAuditEvent(input: AuditInput) {
+export async function writeAuditEvent(
+  input: AuditInput,
+  client: PrismaClient = defaultPrisma,
+) {
   const data: Prisma.AuditEventCreateInput = {
     action: input.action,
     entityType: input.entityType,
@@ -33,5 +36,5 @@ export async function writeAuditEvent(input: AuditInput) {
     data.user = { connect: { id: input.userId } };
   }
 
-  return prisma.auditEvent.create({ data });
+  return client.auditEvent.create({ data });
 }

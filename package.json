@@ -16,6 +16,7 @@
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
     "db:reset": "prisma migrate reset --force",
+    "import:etenders": "tsx scripts/import-etenders.ts",
     "secret-scan": "bash scripts/secret-scan.sh",
     "gate": "npm run lint && npm run typecheck && npm run test && npm run build && npm run secret-scan",
     "postinstall": "prisma generate"

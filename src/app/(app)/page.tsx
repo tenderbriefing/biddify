@@ -72,6 +72,10 @@ export default async function OperationsDashboard() {
       ["PRICING", "QUALIFIED", "SOURCING"].includes(r.status) &&
       r.pricingScenarios.length === 0,
   );
+  const actionQueue = [...active]
+    .filter((r) => r.nextAction && r.nextAction !== "AWAIT_DEADLINE")
+    .sort((a, b) => a.closingAt.getTime() - b.closingAt.getTime());
+  const realSourceCount = rfqs.filter((r) => r.isRealSource).length;
 
   const submitted = rfqs.filter((r) =>
     ["SUBMITTED", "AWARDED", "FULFILMENT", "PAID"].includes(r.status),
@@ -119,6 +123,7 @@ export default async function OperationsDashboard() {
           <span className="badge badge-slate">{companies} companies</span>
           <span className="badge badge-slate">{suppliers} suppliers</span>
           <span className="badge badge-slate">{rfqs.length} RFQs</span>
+          <span className="badge badge-green">{realSourceCount} REAL</span>
           <DemoBadge />
         </div>
       </div>
@@ -183,6 +188,12 @@ export default async function OperationsDashboard() {
               href="/rfqs"
               tone={pricingIncomplete.length ? "amber" : "ok"}
             />
+            <ActionRow
+              label="Next-action queue"
+              count={actionQueue.length}
+              href="/rfqs?real=1"
+              tone={actionQueue.length ? "amber" : "ok"}
+            />
           </div>
         </div>
 
@@ -209,10 +220,66 @@ export default async function OperationsDashboard() {
 
       <section className="panel">
         <div className="panel-header">
-          <span>Attention queue</span>
+          <span>Immediate next actions</span>
           <Link href="/rfqs" className="btn text-xs">
             All RFQs
           </Link>
+        </div>
+        <div className="overflow-x-auto border-b border-[var(--border)]">
+          <table className="ops-table">
+            <thead>
+              <tr>
+                <th>RFQ</th>
+                <th>Next action</th>
+                <th>Qualification</th>
+                <th>Closes</th>
+                <th>Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {actionQueue.slice(0, 8).map((rfq) => (
+                <tr key={`action-${rfq.id}`}>
+                  <td className="mono">
+                    <Link
+                      href={`/rfqs/${rfq.id}`}
+                      className="font-semibold text-[var(--accent)] hover:underline"
+                    >
+                      {rfq.internalId}
+                    </Link>
+                  </td>
+                  <td>
+                    <div className="font-medium">
+                      {rfq.nextAction?.replaceAll("_", " ")}
+                    </div>
+                    <div className="muted text-xs">{rfq.nextActionReason}</div>
+                  </td>
+                  <td>
+                    <GateBadge gate={rfq.qualificationGate} />
+                  </td>
+                  <td className="text-xs">
+                    {formatDateTime(rfq.closingAt, rfq.timezone)}
+                  </td>
+                  <td>
+                    {rfq.isRealSource ? (
+                      <span className="badge badge-green">REAL</span>
+                    ) : (
+                      <DemoBadge />
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {actionQueue.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="muted py-4 text-center">
+                    No open next actions.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="panel-header border-t border-[var(--border)]">
+          <span>Attention queue</span>
         </div>
         <div className="overflow-x-auto">
           <table className="ops-table">
@@ -265,7 +332,7 @@ export default async function OperationsDashboard() {
                       <StatusBadge status={rfq.status} />
                     </td>
                     <td>
-                      <GateBadge gate={rfq.profitabilityGate} />
+                      <GateBadge gate={rfq.qualificationGate} />
                     </td>
                     <td className="whitespace-nowrap text-xs">
                       {formatDateTime(rfq.closingAt, rfq.timezone)}

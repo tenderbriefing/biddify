@@ -11,10 +11,13 @@ Primary initial focus: South African public-sector **supply and deliver** opport
 | Phase | Status |
 | --- | --- |
 | Phase 0 — Repository initialisation | Implemented |
-| Phase 1 — Foundation | Implemented |
-| Phase 2+ | Awaiting Founder approval |
+| Phase 1 — Foundation | Implemented (approved) |
+| Phase 2 — RFQ ops + real data boundary | Implemented |
+| Phase 3+ | Awaiting Founder approval |
 
-**Not deployed. No production integrations. No real email. No RFQ submissions.**
+**Not deployed. No TenderBriefing production writes. No real email. No RFQ submissions.**
+
+Integration boundary: public eTenders OCDS via `TenderSourceAdapter` — see [docs/INTEGRATION_BOUNDARY.md](docs/INTEGRATION_BOUNDARY.md).
 
 ## Stack
 
@@ -88,9 +91,15 @@ GitHub: https://github.com/tenderbriefing/biddify
 - Roles: `FOUNDER`, `ADMIN`, `BID_MANAGER`, `REVIEWER`, `READ_ONLY`.
 - Founder approval permission is separately enforceable (`approval:founder`).
 
-## TenderBriefing integration
+## eTenders import (Phase 2)
 
-Phase 1 does **not** connect to TenderBriefing / eTenders production systems. Integration boundary will be decided in Phase 8 after Founder approval, based on evidence of the safest approach (API / read replica / scheduled import / webhook).
+```bash
+npm run import:etenders -- --dateFrom=2026-10-05 --dateTo=2026-10-11 --limit=5
+```
+
+Reads the **public** OCDS API only. Writes to the local Biddify database. Does not modify TenderBriefing.
+
+Filter UI for real imports: `/rfqs?real=1`
 
 ## Licence
 

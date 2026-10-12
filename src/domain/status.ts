@@ -22,7 +22,7 @@ export type PipelineStatus = (typeof PIPELINE_STATUSES)[number];
 
 /** Allowed forward transitions. Invalid transitions are rejected. */
 const ALLOWED: Record<PipelineStatus, PipelineStatus[]> = {
-  NEW: ["REVIEW", "NO_BID", "CANCELLED"],
+  NEW: ["REVIEW", "QUALIFIED", "NO_BID", "CANCELLED"],
   REVIEW: ["QUALIFIED", "NO_BID", "CANCELLED", "NEW"],
   QUALIFIED: ["SOURCING", "NO_BID", "CANCELLED"],
   SOURCING: ["AWAITING_SUPPLIERS", "PRICING", "NO_BID", "CANCELLED"],

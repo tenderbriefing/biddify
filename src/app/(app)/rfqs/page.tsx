@@ -15,11 +15,12 @@ import type { PipelineStatus } from "@prisma/client";
 export default async function RfqsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string; q?: string }>;
+  searchParams: Promise<{ status?: string; q?: string; real?: string }>;
 }) {
   const params = await searchParams;
   const statusFilter = params.status as PipelineStatus | undefined;
   const q = params.q?.trim();
+  const realOnly = params.real === "1";
 
   const rfqs = await prisma.rfq.findMany({
     where: {
@@ -27,6 +28,7 @@ export default async function RfqsPage({
         statusFilter && PIPELINE_STATUSES.includes(statusFilter as never)
           ? { status: statusFilter }
           : {},
+        realOnly ? { isRealSource: true } : {},
         q
           ? {
               OR: [
@@ -36,6 +38,7 @@ export default async function RfqsPage({
                 { tenderNumber: { contains: q } },
                 { category: { contains: q } },
                 { province: { contains: q } },
+                { sourceOpportunityId: { contains: q } },
               ],
             }
           : {},
@@ -101,34 +104,37 @@ export default async function RfqsPage({
               <th>Tender / Buyer</th>
               <th>Category</th>
               <th>Company</th>
-              <th>Status</th>
-              <th>Gate</th>
-              <th>Closing</th>
-              <th>Remaining</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rfqs.map((rfq) => {
-              const deadline = evaluateDeadline(
-                rfq.closingAt,
-                now,
-                rfq.timezone,
-              );
-              return (
-                <tr key={rfq.id}>
-                  <td className="mono">
-                    <Link
-                      href={`/rfqs/${rfq.id}`}
-                      className="font-semibold text-[var(--accent)] hover:underline"
-                    >
-                      {rfq.internalId}
-                    </Link>
-                    {rfq.isDemo && (
-                      <div className="mt-1">
-                        <DemoBadge />
+                <th>Status</th>
+                <th>Qualification</th>
+                <th>Next action</th>
+                <th>Closing</th>
+                <th>Remaining</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rfqs.map((rfq) => {
+                const deadline = evaluateDeadline(
+                  rfq.closingAt,
+                  now,
+                  rfq.timezone,
+                );
+                return (
+                  <tr key={rfq.id}>
+                    <td className="mono">
+                      <Link
+                        href={`/rfqs/${rfq.id}`}
+                        className="font-semibold text-[var(--accent)] hover:underline"
+                      >
+                        {rfq.internalId}
+                      </Link>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {rfq.isRealSource ? (
+                          <span className="badge badge-green">REAL</span>
+                        ) : rfq.isDemo ? (
+                          <DemoBadge />
+                        ) : null}
                       </div>
-                    )}
-                  </td>
+                    </td>
                   <td>
                     <div className="font-medium">{rfq.title}</div>
                     <div className="muted text-xs">
@@ -144,31 +150,42 @@ export default async function RfqsPage({
                       rfq.selectedCompany?.legalName ??
                       "Unassigned"}
                   </td>
-                  <td>
-                    <StatusBadge status={rfq.status} />
-                  </td>
-                  <td>
-                    <GateBadge gate={rfq.profitabilityGate} />
-                  </td>
-                  <td className="whitespace-nowrap text-xs">
-                    {formatDateTime(rfq.closingAt, rfq.timezone)}
-                  </td>
-                  <td>
-                    <div className="flex items-center gap-2">
-                      <DeadlineBadge warning={deadline.warning} />
-                      <span className="mono text-xs">{deadline.label}</span>
-                    </div>
+                    <td>
+                      <StatusBadge status={rfq.status} />
+                    </td>
+                    <td>
+                      <GateBadge gate={rfq.qualificationGate} />
+                      {rfq.classification && (
+                        <div className="muted mt-1 text-[11px]">
+                          {rfq.classification.replaceAll("_", " ")}
+                        </div>
+                      )}
+                    </td>
+                    <td className="text-xs">
+                      {rfq.nextAction?.replaceAll("_", " ") ?? "—"}
+                    </td>
+                    <td className="whitespace-nowrap text-xs">
+                      {formatDateTime(rfq.closingAt, rfq.timezone)}
+                      {!rfq.closingTimeKnown && (
+                        <div className="badge badge-amber mt-1">Time UNKNOWN</div>
+                      )}
+                    </td>
+                    <td>
+                      <div className="flex items-center gap-2">
+                        <DeadlineBadge warning={deadline.warning} />
+                        <span className="mono text-xs">{deadline.label}</span>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+              {rfqs.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="muted py-8 text-center">
+                    No RFQs match this filter.
                   </td>
                 </tr>
-              );
-            })}
-            {rfqs.length === 0 && (
-              <tr>
-                <td colSpan={8} className="muted py-8 text-center">
-                  No RFQs match this filter.
-                </td>
-              </tr>
-            )}
+              )}
           </tbody>
         </table>
       </div>

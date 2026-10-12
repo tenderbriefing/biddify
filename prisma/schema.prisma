@@ -83,6 +83,65 @@ enum AuditAction {
   USER_LOGOUT
   SEED_LOADED
   NOTE_ADDED
+  RFQ_CLASSIFIED
+  RFQ_QUALIFIED
+  RFQ_NO_BID
+  RFQ_DUPLICATE_LINKED
+  RFQ_UPDATED_FROM_SOURCE
+}
+
+enum OpportunityClass {
+  SUPPLY_AND_DELIVER
+  SERVICES
+  CONSTRUCTION
+  CONSULTING
+  TRAINING
+  ICT
+  OTHER
+}
+
+enum ClassificationSource {
+  HEURISTIC
+  MANUAL
+  AI
+}
+
+enum NoBidCategory {
+  DEADLINE
+  BRIEFING_MISSED
+  COMPLIANCE
+  LICENCE
+  GRADING
+  SUPPLIER_UNAVAILABLE
+  DELIVERY
+  CAPITAL
+  MARGIN
+  SPECIFICATION
+  COMPANY_NOT_ELIGIBLE
+  FOUNDER_REJECTED
+  OTHER
+}
+
+enum NextAction {
+  REVIEW_DOCUMENTS
+  VERIFY_COMPULSORY_BRIEFING
+  SELECT_BIDDING_COMPANY
+  SOURCE_SUPPLIERS
+  VERIFY_LICENCE
+  CONFIRM_DELIVERY
+  NO_BID
+  READY_FOR_SOURCING
+  COMPLETE_COMPLIANCE
+  FOUNDERS_REVIEW
+  AWAIT_DEADLINE
+  MANUAL_REVIEW
+}
+
+enum FactProvenance {
+  SOURCE_FACT
+  HEURISTIC
+  AI_INTERPRETATION
+  MANUAL
 }
 
 model User {
@@ -199,8 +258,11 @@ model Rfq {
   id                    String             @id @default(cuid())
   internalId            String             @unique
   source                String
+  /// Deterministic source identity key (e.g. OCDS ocid). Unique with source.
+  sourceOpportunityId   String?
   sourceReference       String?
   tenderNumber          String?
+  ocid                  String?
   buyer                 String
   department            String?
   title                 String
@@ -210,10 +272,18 @@ model Rfq {
   municipality          String?
   deliveryAddress       String?
   publicationDate       DateTime?
+  sourcePublishedAt     DateTime?
+  sourceLastModifiedAt  DateTime?
+  importedAt            DateTime?
+  rawSourceMetadata     String?
   briefingDate          DateTime?
   briefingCompulsory    Boolean            @default(false)
+  /// False when source does not state whether briefing is compulsory.
+  briefingCompulsoryKnown Boolean          @default(false)
   questionsDeadline     DateTime?
   closingAt             DateTime
+  /// False when source provided a date but no closing time — do not invent 23:59.
+  closingTimeKnown      Boolean            @default(true)
   timezone              String             @default("Africa/Johannesburg")
   submissionMethod      SubmissionMethod   @default(UNKNOWN)
   submissionEmail       String?
@@ -230,9 +300,27 @@ model Rfq {
   complianceScore       Int?
   profitabilityGate     ProfitabilityGate  @default(UNREVIEWED)
   opportunityScoreNotes String?
+  opportunityScoreBreakdown String?
+  classification        OpportunityClass?
+  classificationConfidence Float?
+  classificationReasoning String?
+  classificationSource  ClassificationSource?
+  classificationOverride OpportunityClass?
+  qualificationGate     ProfitabilityGate  @default(UNREVIEWED)
+  qualificationReasons  String?
+  qualificationSnapshot String?
+  qualificationOverride ProfitabilityGate?
+  nextAction            NextAction?
+  nextActionReason      String?
   noBidReason           String?
+  noBidCategory         NoBidCategory?
+  noBidNotes            String?
+  noBidDecidedAt        DateTime?
   selectedCompanyId     String?
   duplicateOfId         String?
+  duplicateGroupId      String?
+  /// True for genuine procurement source imports (not DEMO seed).
+  isRealSource          Boolean            @default(false)
   isDemo                Boolean            @default(false)
   createdAt             DateTime           @default(now())
   updatedAt             DateTime           @updatedAt
@@ -249,9 +337,14 @@ model Rfq {
   bids            Bid[]
   statusEvents    RfqStatusEvent[]
 
+  @@unique([source, sourceOpportunityId])
   @@index([status])
   @@index([closingAt])
   @@index([selectedCompanyId])
+  @@index([isRealSource])
+  @@index([classification])
+  @@index([nextAction])
+  @@index([duplicateGroupId])
 }
 
 model RfqLineItem {
@@ -278,14 +371,20 @@ model RfqLineItem {
 }
 
 model RfqRequirement {
-  id          String   @id @default(cuid())
-  rfqId       String
-  category    String
-  description String
-  isMandatory Boolean  @default(true)
-  sourceHint  String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                 String         @id @default(cuid())
+  rfqId              String
+  category           String
+  requirementType    String?
+  description        String
+  isMandatory        Boolean        @default(true)
+  sourceHint         String?
+  sourceDocument     String?
+  sourcePage         String?
+  verificationStatus String         @default("UNVERIFIED")
+  provenance         FactProvenance @default(HEURISTIC)
+  notes              String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 
   rfq Rfq @relation(fields: [rfqId], references: [id], onDelete: Cascade)
 
@@ -298,6 +397,8 @@ model RfqDocument {
   fileName     String
   documentType String?
   storageKey   String?
+  sourceUrl    String?
+  format       String?
   pageCount    Int?
   extractedAt  DateTime?
   isSource     Boolean  @default(true)
