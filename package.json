@@ -17,6 +17,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:reset": "prisma migrate reset --force",
     "import:etenders": "tsx scripts/import-etenders.ts",
+    "phase3:pilot": "tsx scripts/phase3-pilot.ts",
     "secret-scan": "bash scripts/secret-scan.sh",
     "gate": "npm run lint && npm run typecheck && npm run test && npm run build && npm run secret-scan",
     "postinstall": "prisma generate"
@@ -28,6 +29,7 @@
     "date-fns": "^4.4.0",
     "jose": "^6.1.0",
     "next": "16.4.0",
+    "pdf-parse": "^1.1.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "zod": "^4.6.6"

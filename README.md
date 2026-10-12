@@ -12,10 +12,11 @@ Primary initial focus: South African public-sector **supply and deliver** opport
 | --- | --- |
 | Phase 0 — Repository initialisation | Implemented |
 | Phase 1 — Foundation | Implemented (approved) |
-| Phase 2 — RFQ ops + real data boundary | Implemented |
-| Phase 3+ | Awaiting Founder approval |
+| Phase 2 — RFQ ops + real data boundary | Implemented (approved) |
+| Phase 3 — Supplier intelligence & commercial proof | Implemented — awaiting Founder review |
+| Phase 4+ | Awaiting Founder approval |
 
-**Not deployed. No TenderBriefing production writes. No real email. No RFQ submissions.**
+**Not deployed. No TenderBriefing production writes. No real email. No RFQ submissions. No Gmail.**
 
 Integration boundary: public eTenders OCDS via `TenderSourceAdapter` — see [docs/INTEGRATION_BOUNDARY.md](docs/INTEGRATION_BOUNDARY.md).
 
@@ -100,6 +101,20 @@ npm run import:etenders -- --dateFrom=2026-10-05 --dateTo=2026-10-11 --limit=5
 Reads the **public** OCDS API only. Writes to the local Biddify database. Does not modify TenderBriefing.
 
 Filter UI for real imports: `/rfqs?real=1`
+
+## Phase 3 commercial pilot
+
+```bash
+npm run phase3:pilot
+```
+
+Document-first pipeline for BID-000011 (Johannesburg Water / Cydna Lab consumables):
+
+source PDF → hash-cached extract → verified line items → real public suppliers →
+`DRAFT_NOT_SENT` enquiry drafts → labelled `PUBLIC_PRICE_REFERENCE` / manual logistics →
+comparison → landed cost → 20% markup scenario → working capital → GREEN/AMBER/RED.
+
+Does **not** send supplier email or submit bids. Public prices are never stored as `SUPPLIER_QUOTE`.
 
 ## Licence
 

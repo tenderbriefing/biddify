@@ -76,6 +76,32 @@ export default async function OperationsDashboard() {
     .filter((r) => r.nextAction && r.nextAction !== "AWAIT_DEADLINE")
     .sort((a, b) => a.closingAt.getTime() - b.closingAt.getTime());
   const realSourceCount = rfqs.filter((r) => r.isRealSource).length;
+  const needsDocReview = active.filter((r) =>
+    ["DOWNLOAD_DOCUMENTS", "REVIEW_DOCUMENTS", "VERIFY_EXTRACTION"].includes(
+      r.nextAction ?? "",
+    ),
+  ).length;
+  const readyForSourcing = active.filter((r) =>
+    ["SOURCE_SUPPLIERS", "READY_FOR_SOURCING", "REQUEST_QUOTES"].includes(
+      r.nextAction ?? "",
+    ),
+  ).length;
+  const quotesRequired = active.filter((r) =>
+    ["REQUEST_QUOTES", "AWAIT_QUOTES"].includes(r.nextAction ?? ""),
+  ).length;
+  const pricingIncompleteCount = active.filter((r) =>
+    ["COMPARE_QUOTES", "CALCULATE_LOGISTICS", "REVIEW_PRICING"].includes(
+      r.nextAction ?? "",
+    ),
+  ).length;
+  const commercialReview = active.filter((r) =>
+    ["READY_FOR_COMMERCIAL_REVIEW", "VERIFY_WORKING_CAPITAL", "FOUNDERS_REVIEW"].includes(
+      r.nextAction ?? "",
+    ),
+  ).length;
+  const gateGreen = active.filter((r) => r.profitabilityGate === "GREEN").length;
+  const gateAmber = active.filter((r) => r.profitabilityGate === "AMBER").length;
+  const gateRed = active.filter((r) => r.profitabilityGate === "RED").length;
 
   const submitted = rfqs.filter((r) =>
     ["SUBMITTED", "AWARDED", "FULFILMENT", "PAID"].includes(r.status),
@@ -165,10 +191,40 @@ export default async function OperationsDashboard() {
           <div className="panel-header">Action required</div>
           <div className="panel-body space-y-2 text-sm">
             <ActionRow
-              label="Founder approvals required"
-              count={needsFounder.length}
-              href="/rfqs?status=FOUNDER_REVIEW"
-              tone={needsFounder.length ? "amber" : "ok"}
+              label="Document review"
+              count={needsDocReview}
+              href="/rfqs"
+              tone={needsDocReview ? "amber" : "ok"}
+            />
+            <ActionRow
+              label="Ready for sourcing"
+              count={readyForSourcing}
+              href="/rfqs"
+              tone={readyForSourcing ? "amber" : "ok"}
+            />
+            <ActionRow
+              label="Quotes required / awaiting"
+              count={quotesRequired || awaitingSuppliers.length}
+              href="/rfqs"
+              tone={quotesRequired || awaitingSuppliers.length ? "amber" : "ok"}
+            />
+            <ActionRow
+              label="Pricing incomplete"
+              count={pricingIncompleteCount || pricingIncomplete.length}
+              href="/rfqs"
+              tone={
+                pricingIncompleteCount || pricingIncomplete.length
+                  ? "amber"
+                  : "ok"
+              }
+            />
+            <ActionRow
+              label="Commercial review"
+              count={commercialReview || needsFounder.length}
+              href="/rfqs"
+              tone={
+                commercialReview || needsFounder.length ? "amber" : "ok"
+              }
             />
             <ActionRow
               label="Compliance missing"
@@ -176,24 +232,11 @@ export default async function OperationsDashboard() {
               href="/rfqs"
               tone={complianceBlocked.length ? "red" : "ok"}
             />
-            <ActionRow
-              label="Supplier quotes outstanding"
-              count={awaitingSuppliers.length}
-              href="/rfqs?status=SOURCING"
-              tone={awaitingSuppliers.length ? "amber" : "ok"}
-            />
-            <ActionRow
-              label="Pricing incomplete"
-              count={pricingIncomplete.length}
-              href="/rfqs"
-              tone={pricingIncomplete.length ? "amber" : "ok"}
-            />
-            <ActionRow
-              label="Next-action queue"
-              count={actionQueue.length}
-              href="/rfqs?real=1"
-              tone={actionQueue.length ? "amber" : "ok"}
-            />
+            <div className="flex flex-wrap gap-2 pt-1">
+              <span className="badge badge-green">GREEN {gateGreen}</span>
+              <span className="badge badge-amber">AMBER {gateAmber}</span>
+              <span className="badge badge-red">RED {gateRed}</span>
+            </div>
           </div>
         </div>
 

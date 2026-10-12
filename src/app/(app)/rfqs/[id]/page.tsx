@@ -17,6 +17,10 @@ import {
   VatBadge,
 } from "@/components/StatusBadge";
 import { QualificationPanel } from "@/components/QualificationPanel";
+import {
+  CommercialPanel,
+  EvidenceBadge,
+} from "@/components/CommercialPanel";
 import { formatClosingDisplay } from "@/domain/deadlineParse";
 
 const TABS = [
@@ -54,8 +58,12 @@ export default async function RfqWorkspacePage({
       quotes: {
         include: {
           supplier: true,
-          lineItems: true,
+          lineItems: { include: { rfqLineItem: true } },
         },
+      },
+      enquiries: {
+        include: { supplier: true },
+        orderBy: { createdAt: "desc" },
       },
       pricingScenarios: {
         include: { lineItems: true },
@@ -273,11 +281,28 @@ export default async function RfqWorkspacePage({
             <div className="panel">
               <div className="panel-header">Commercial snapshot</div>
               <div className="panel-body space-y-2 text-sm">
+                <FactRow
+                  label="Commercial gate"
+                  value={rfq.profitabilityGate}
+                />
+                <FactRow
+                  label="Line items"
+                  value={`${rfq.lineItems.length} · suppliers ${
+                    new Set([
+                      ...rfq.quotes.map((q) => q.supplierId),
+                      ...rfq.enquiries.map((e) => e.supplierId),
+                    ]).size
+                  } · quotes/evidence ${rfq.quotes.length}`}
+                />
                 {selectedPricing ? (
                   <>
                     <FactRow
                       label="Landed cost"
                       value={formatZar(Number(selectedPricing.landedCost))}
+                    />
+                    <FactRow
+                      label="Proposed bid"
+                      value={formatZar(Number(selectedPricing.totalQuotation))}
                     />
                     <FactRow
                       label="Gross profit"
@@ -287,6 +312,19 @@ export default async function RfqWorkspacePage({
                       label="Gross margin"
                       value={formatPercent(Number(selectedPricing.grossMarginPercent))}
                     />
+                    <FactRow
+                      label="Cash required"
+                      value={formatZar(
+                        Number(
+                          selectedPricing.upfrontCashRequired ??
+                            selectedPricing.workingCapitalRequired,
+                        ),
+                      )}
+                    />
+                    <FactRow
+                      label="Evidence"
+                      value={selectedPricing.evidenceQuality ?? "—"}
+                    />
                     {selectedPricing.vatRegisteredSnapshot != null && (
                       <VatBadge
                         vatRegistered={selectedPricing.vatRegisteredSnapshot}
@@ -295,7 +333,8 @@ export default async function RfqWorkspacePage({
                   </>
                 ) : (
                   <p className="muted">
-                    No supplier pricing yet — commercial margin not heavily scored.
+                    No pricing scenario yet — extract documents, source suppliers,
+                    then enter quote or labelled price evidence.
                   </p>
                 )}
                 {rfq.selectedCompany && (
@@ -315,7 +354,9 @@ export default async function RfqWorkspacePage({
       {tab === "specifications" && (
         <div className="space-y-3">
           <div className="panel overflow-x-auto">
-            <div className="panel-header">Line items</div>
+            <div className="panel-header">
+              What we need — line items (verification required)
+            </div>
             <table className="ops-table">
               <thead>
                 <tr>
@@ -326,6 +367,7 @@ export default async function RfqWorkspacePage({
                   <th>Qty</th>
                   <th>Unit</th>
                   <th>Equiv.</th>
+                  <th>Verification</th>
                 </tr>
               </thead>
               <tbody>
@@ -337,18 +379,40 @@ export default async function RfqWorkspacePage({
                       {li.product && (
                         <div className="muted text-xs">{li.description}</div>
                       )}
+                      {li.extractionMethod && (
+                        <div className="muted mt-1 text-[10px]">
+                          {li.extractionMethod}
+                          {li.extractionConfidence != null
+                            ? ` · conf ${li.extractionConfidence}`
+                            : ""}
+                          {li.sourceSection ? ` · ${li.sourceSection}` : ""}
+                        </div>
+                      )}
                     </td>
                     <td className="text-xs">{li.specification ?? "—"}</td>
                     <td className="text-xs">{li.brandRequirement ?? "—"}</td>
                     <td className="mono">{Number(li.quantity)}</td>
                     <td>{li.unit}</td>
                     <td>{li.equivalentAllowed ? "Yes" : "No"}</td>
+                    <td>
+                      <span
+                        className={`badge ${
+                          li.verificationStatus === "VERIFIED"
+                            ? "badge-green"
+                            : li.verificationStatus === "CORRECTED"
+                              ? "badge-amber"
+                              : "badge-slate"
+                        }`}
+                      >
+                        {li.verificationStatus}
+                      </span>
+                    </td>
                   </tr>
                 ))}
                 {rfq.lineItems.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="muted py-6 text-center">
-                      No line items captured.
+                    <td colSpan={8} className="muted py-6 text-center">
+                      No line items captured — download and extract source documents.
                     </td>
                   </tr>
                 )}
@@ -384,68 +448,169 @@ export default async function RfqWorkspacePage({
 
       {tab === "documents" && (
         <div className="panel overflow-x-auto">
-          <div className="panel-header">Documents (source preserved)</div>
+          <div className="panel-header">Source documents (hash-cached)</div>
           <table className="ops-table">
             <thead>
               <tr>
                 <th>File</th>
-                <th>Type</th>
-                <th>Source</th>
-                <th>Notes</th>
+                <th>State</th>
+                <th>Hash</th>
+                <th>Retrieved</th>
+                <th>Pages</th>
+                <th>Source URL</th>
               </tr>
             </thead>
             <tbody>
               {rfq.documents.map((doc) => (
                 <tr key={doc.id}>
-                  <td className="mono">{doc.fileName}</td>
-                  <td>{doc.documentType ?? "—"}</td>
-                  <td>{doc.isSource ? "Yes" : "Derived"}</td>
-                  <td className="text-xs">{doc.notes ?? "—"}</td>
+                  <td className="mono text-xs">{doc.fileName}</td>
+                  <td>
+                    <span className="badge badge-slate">{doc.processingState}</span>
+                  </td>
+                  <td className="mono text-[11px]">
+                    {doc.contentHash ? `${doc.contentHash.slice(0, 12)}…` : "—"}
+                  </td>
+                  <td className="text-xs">{formatDateTime(doc.retrievedAt, rfq.timezone)}</td>
+                  <td className="mono">{doc.pageCount ?? "—"}</td>
+                  <td className="text-xs break-all">{doc.sourceUrl ?? "—"}</td>
                 </tr>
               ))}
-              {rfq.documents.length === 0 && (
-                <tr>
-                  <td colSpan={4} className="muted py-6 text-center">
-                    No documents attached.
-                  </td>
-                </tr>
-              )}
             </tbody>
           </table>
         </div>
       )}
 
       {tab === "suppliers" && (
-        <div className="panel">
-          <div className="panel-header">Linked suppliers (via quotes)</div>
-          <ul className="panel-body space-y-2 text-sm">
-            {rfq.quotes.map((q) => (
-              <li key={q.id} className="flex items-center justify-between border border-[var(--border)] px-3 py-2">
-                <div>
-                  <Link
-                    href={`/suppliers/${q.supplier.id}`}
-                    className="font-semibold text-[var(--accent)] hover:underline"
-                  >
-                    {q.supplier.name}
-                  </Link>
-                  <div className="muted text-xs">
-                    {q.supplier.categories ?? "—"}
+        <div className="space-y-3">
+          <div className="panel">
+            <div className="panel-header">Discovered suppliers</div>
+            <ul className="panel-body space-y-2 text-sm">
+              {[
+                ...new Map(
+                  [
+                    ...rfq.quotes.map((q) => q.supplier),
+                    ...rfq.enquiries.map((e) => e.supplier),
+                  ].map((s) => [s.id, s]),
+                ).values(),
+              ].map((s) => (
+                <li
+                  key={s.id}
+                  className="border border-[var(--border)] px-3 py-2"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Link
+                      href={`/suppliers/${s.id}`}
+                      className="font-semibold text-[var(--accent)] hover:underline"
+                    >
+                      {s.name}
+                    </Link>
+                    <span className="badge badge-slate">
+                      {s.supplierType ?? "supplier"}
+                    </span>
                   </div>
-                </div>
-                <span className="badge badge-slate">
-                  {q.isComplete ? "Quote complete" : "Incomplete"}
-                </span>
-              </li>
-            ))}
-            {rfq.quotes.length === 0 && (
-              <li className="muted">No suppliers linked yet.</li>
-            )}
-          </ul>
+                  <div className="muted mt-1 text-xs">
+                    {s.discoverySource ?? "—"} · {s.verificationStatus}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="panel">
+            <div className="panel-header">Supplier RFQ drafts (NOT SENT)</div>
+            <ul className="panel-body space-y-3 text-sm">
+              {rfq.enquiries.map((e) => (
+                <li key={e.id} className="border border-[var(--border)] px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold">{e.supplier.name}</span>
+                    <span className="badge badge-amber">{e.deliveryState}</span>
+                  </div>
+                  <div className="mt-1 text-xs font-medium">{e.subject}</div>
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap bg-[#f8fafc] p-2 text-[11px]">
+                    {e.body}
+                  </pre>
+                </li>
+              ))}
+              {rfq.enquiries.length === 0 && (
+                <li className="muted">No enquiry drafts yet.</li>
+              )}
+            </ul>
+          </div>
         </div>
       )}
 
       {tab === "quotes" && (
         <div className="space-y-3">
+          <div className="panel overflow-x-auto">
+            <div className="panel-header">Quote comparison matrix</div>
+            <table className="ops-table">
+              <thead>
+                <tr>
+                  <th>RFQ item</th>
+                  <th>Qty</th>
+                  <th>Spec</th>
+                  <th>Offer</th>
+                  <th>Unit</th>
+                  <th>Total</th>
+                  <th>Match</th>
+                  <th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rfq.lineItems.map((li) => {
+                  const offers = rfq.quotes.flatMap((q) =>
+                    q.lineItems
+                      .filter((ql) => ql.rfqLineItemId === li.id)
+                      .map((ql) => ({ q, ql })),
+                  );
+                  if (offers.length === 0) {
+                    return (
+                      <tr key={li.id}>
+                        <td>{li.description}</td>
+                        <td className="mono">{Number(li.quantity)}</td>
+                        <td className="text-xs">{li.specification ?? "—"}</td>
+                        <td colSpan={5} className="muted">
+                          No mapped offers
+                        </td>
+                      </tr>
+                    );
+                  }
+                  return offers.map(({ q, ql }, idx) => (
+                    <tr key={`${li.id}-${ql.id}`}>
+                      {idx === 0 ? (
+                        <>
+                          <td rowSpan={offers.length}>{li.description}</td>
+                          <td rowSpan={offers.length} className="mono">
+                            {Number(li.quantity)}
+                          </td>
+                          <td rowSpan={offers.length} className="text-xs">
+                            {li.specification ?? "—"}
+                          </td>
+                        </>
+                      ) : null}
+                      <td className="text-xs">{q.supplier.name}</td>
+                      <td className="mono">
+                        {ql.priceKnown && ql.unitCost != null
+                          ? formatZar(Number(ql.unitCost))
+                          : "UNKNOWN"}
+                      </td>
+                      <td className="mono">
+                        {ql.lineTotal != null
+                          ? formatZar(Number(ql.lineTotal))
+                          : "UNKNOWN"}
+                      </td>
+                      <td>
+                        <span className="badge badge-slate">{ql.matchState}</span>
+                      </td>
+                      <td>
+                        <EvidenceBadge type={q.evidenceType} />
+                      </td>
+                    </tr>
+                  ));
+                })}
+              </tbody>
+            </table>
+          </div>
+
           {rfq.quotes.map((q) => (
             <div key={q.id} className="panel overflow-x-auto">
               <div className="panel-header">
@@ -453,99 +618,50 @@ export default async function RfqWorkspacePage({
                   {q.supplier.name}
                   {q.quoteReference ? ` · ${q.quoteReference}` : ""}
                 </span>
-                <span className="badge badge-slate">
-                  {q.isComplete ? "Complete" : "Incomplete"}
-                </span>
+                <EvidenceBadge type={q.evidenceType} />
               </div>
               <div className="panel-body grid gap-2 text-sm md:grid-cols-4">
-                <Fact label="Delivery" value={formatZar(Number(q.deliveryCost))} />
-                <Fact label="Lead time" value={q.leadTimeDays != null ? `${q.leadTimeDays} days` : "—"} />
-                <Fact label="Payment" value={q.paymentTerms ?? "—"} />
                 <Fact
-                  label="Valid until"
-                  value={formatDateTime(q.validUntil, rfq.timezone)}
+                  label="Delivery"
+                  value={
+                    q.deliveryKnown && q.deliveryCost != null
+                      ? formatZar(Number(q.deliveryCost))
+                      : "UNKNOWN"
+                  }
                 />
+                <Fact
+                  label="VAT on quote"
+                  value={
+                    q.vatKnown
+                      ? q.vatIncluded
+                        ? "Inclusive"
+                        : "Exclusive"
+                      : "UNKNOWN"
+                  }
+                />
+                <Fact
+                  label="Lead time"
+                  value={q.leadTimeDays != null ? `${q.leadTimeDays} days` : "—"}
+                />
+                <Fact label="Verification" value={q.verificationState} />
               </div>
-              <table className="ops-table">
-                <thead>
-                  <tr>
-                    <th>Description</th>
-                    <th>Qty</th>
-                    <th>Unit cost</th>
-                    <th>Line total</th>
-                    <th>Brand</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {q.lineItems.map((li) => (
-                    <tr key={li.id}>
-                      <td>{li.description}</td>
-                      <td className="mono">{Number(li.quantity)}</td>
-                      <td className="mono">{formatZar(Number(li.unitCost))}</td>
-                      <td className="mono">{formatZar(Number(li.lineTotal))}</td>
-                      <td>{li.brandOffered ?? "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
               {q.notes && (
                 <div className="panel-body muted text-xs">Notes: {q.notes}</div>
               )}
             </div>
           ))}
-          {rfq.quotes.length === 0 && (
-            <div className="panel panel-body muted">No supplier quotes yet.</div>
-          )}
         </div>
       )}
 
       {tab === "pricing" && (
-        <div className="space-y-3">
-          {rfq.pricingScenarios.map((s) => (
-            <div key={s.id} className="panel">
-              <div className="panel-header">
-                <span>
-                  {s.name} {s.isSelected ? "(selected)" : ""}
-                </span>
-                <GateBadge gate={s.profitabilityGate} />
-              </div>
-              <div className="panel-body grid gap-2 text-sm md:grid-cols-3">
-                <Fact label="Supplier cost" value={formatZar(Number(s.supplierCostTotal))} />
-                <Fact label="Delivery" value={formatZar(Number(s.deliveryCost))} />
-                <Fact label="Logistics" value={formatZar(Number(s.logisticsCost))} />
-                <Fact label="Contingency" value={formatZar(Number(s.contingencyCost))} />
-                <Fact label="Landed cost" value={formatZar(Number(s.landedCost))} />
-                <Fact label="Markup" value={formatPercent(Number(s.markupPercent))} />
-                <Fact label="Sell ex VAT" value={formatZar(Number(s.sellingPriceExVat))} />
-                <Fact label="VAT" value={formatZar(Number(s.vatAmount))} />
-                <Fact label="Total quotation" value={formatZar(Number(s.totalQuotation))} />
-                <Fact label="Gross profit" value={formatZar(Number(s.grossProfit))} />
-                <Fact label="Gross margin" value={formatPercent(Number(s.grossMarginPercent))} />
-                <Fact label="Working capital" value={formatZar(Number(s.workingCapitalRequired))} />
-              </div>
-              {s.vatRegisteredSnapshot != null && (
-                <div className="px-4 pb-3">
-                  <VatBadge vatRegistered={s.vatRegisteredSnapshot} />
-                  <p className="muted mt-2 text-xs">
-                    VAT is never inferred. Snapshot taken from selected company
-                    VAT status at pricing time.
-                  </p>
-                </div>
-              )}
-              {s.notes && (
-                <div className="border-t border-[var(--border)] px-4 py-3 text-xs">
-                  {s.notes}
-                </div>
-              )}
-            </div>
-          ))}
-          {rfq.pricingScenarios.length === 0 && (
-            <div className="panel panel-body muted">
-              No pricing scenarios. Commercial engine available in domain layer;
-              UI editing arrives in Phase 4.
-            </div>
-          )}
-        </div>
+        <CommercialPanel
+          scenario={
+            rfq.pricingScenarios.find((s) => s.isSelected) ??
+            rfq.pricingScenarios[0] ??
+            null
+          }
+          companyVatRegistered={rfq.selectedCompany?.vatRegistered}
+        />
       )}
 
       {tab === "compliance" && (

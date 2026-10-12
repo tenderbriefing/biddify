@@ -88,6 +88,14 @@ enum AuditAction {
   RFQ_NO_BID
   RFQ_DUPLICATE_LINKED
   RFQ_UPDATED_FROM_SOURCE
+  DOCUMENT_RETRIEVED
+  DOCUMENT_EXTRACTED
+  LINE_ITEMS_VERIFIED
+  SUPPLIER_DISCOVERED
+  SUPPLIER_ENQUIRY_DRAFTED
+  QUOTE_RECORDED
+  PRICING_CALCULATED
+  COMMERCIAL_GATE_SET
 }
 
 enum OpportunityClass {
@@ -123,18 +131,67 @@ enum NoBidCategory {
 }
 
 enum NextAction {
+  DOWNLOAD_DOCUMENTS
   REVIEW_DOCUMENTS
+  VERIFY_EXTRACTION
   VERIFY_COMPULSORY_BRIEFING
   SELECT_BIDDING_COMPANY
   SOURCE_SUPPLIERS
+  REQUEST_QUOTES
+  AWAIT_QUOTES
+  COMPARE_QUOTES
+  VERIFY_PRODUCT_MATCH
+  CALCULATE_LOGISTICS
+  REVIEW_PRICING
+  VERIFY_WORKING_CAPITAL
+  VERIFY_OEM_AUTHORIZATION
   VERIFY_LICENCE
   CONFIRM_DELIVERY
+  READY_FOR_COMMERCIAL_REVIEW
   NO_BID
   READY_FOR_SOURCING
   COMPLETE_COMPLIANCE
   FOUNDERS_REVIEW
   AWAIT_DEADLINE
   MANUAL_REVIEW
+}
+
+enum DocumentProcessingState {
+  PENDING
+  DOWNLOADED
+  EXTRACTED
+  FAILED
+  SKIPPED_UNCHANGED
+}
+
+enum ExtractionVerification {
+  UNVERIFIED
+  VERIFIED
+  CORRECTED
+  UNKNOWN
+}
+
+enum SpecMatchState {
+  EXACT_MATCH
+  COMPLIANT_EQUIVALENT
+  POSSIBLE_MATCH
+  NON_COMPLIANT
+  UNKNOWN
+}
+
+enum QuoteEvidenceType {
+  SUPPLIER_QUOTE
+  PUBLIC_PRICE_REFERENCE
+  MANUAL_ESTIMATE
+  HISTORICAL_PRICE
+  UNKNOWN
+}
+
+enum EnquiryDeliveryState {
+  DRAFT_NOT_SENT
+  READY_TO_SEND
+  SENT
+  FAILED
 }
 
 enum FactProvenance {
@@ -229,13 +286,19 @@ model Supplier {
   reliabilityNotes    String?
   responseSpeedNotes  String?
   notes               String?
+  supplierType        String?
+  discoverySource     String?
+  verificationStatus  String   @default("UNVERIFIED")
+  evidenceUrl         String?
+  location            String?
   isDemo              Boolean  @default(false)
   isActive            Boolean  @default(true)
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  contacts SupplierContact[]
-  quotes   SupplierQuote[]
+  contacts  SupplierContact[]
+  quotes    SupplierQuote[]
+  enquiries SupplierEnquiry[]
 }
 
 model SupplierContact {
@@ -336,6 +399,7 @@ model Rfq {
   complianceItems ComplianceRequirement[]
   bids            Bid[]
   statusEvents    RfqStatusEvent[]
+  enquiries       SupplierEnquiry[]
 
   @@unique([source, sourceOpportunityId])
   @@index([status])
@@ -348,22 +412,33 @@ model Rfq {
 }
 
 model RfqLineItem {
-  id                 String   @id @default(cuid())
-  rfqId              String
-  lineNumber         Int
-  product            String?
-  description        String
-  specification      String?
-  brandRequirement   String?
-  equivalentAllowed  Boolean  @default(true)
-  quantity           Decimal
-  unit               String   @default("EA")
-  deliveryDestination String?
-  notes              String?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id                    String                 @id @default(cuid())
+  rfqId                 String
+  lineNumber            Int
+  product               String?
+  description           String
+  specification         String?
+  brandRequirement      String?
+  brand                 String?
+  model                 String?
+  sku                   String?
+  equivalentAllowed     Boolean                @default(true)
+  mandatoryCharacteristics String?
+  quantity              Decimal
+  unit                  String                 @default("EA")
+  deliveryDestination   String?
+  notes                 String?
+  verificationStatus    ExtractionVerification @default(UNVERIFIED)
+  extractionMethod      String?
+  extractionConfidence  Float?
+  sourceDocumentId      String?
+  sourcePage            String?
+  sourceSection         String?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
 
   rfq               Rfq                  @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  sourceDocument    RfqDocument?         @relation(fields: [sourceDocumentId], references: [id])
   quoteLineItems    SupplierQuoteLineItem[]
   pricingLineItems  PricingLineItem[]
 
@@ -392,43 +467,62 @@ model RfqRequirement {
 }
 
 model RfqDocument {
-  id           String   @id @default(cuid())
-  rfqId        String
-  fileName     String
-  documentType String?
-  storageKey   String?
-  sourceUrl    String?
-  format       String?
-  pageCount    Int?
-  extractedAt  DateTime?
-  isSource     Boolean  @default(true)
-  notes        String?
-  isDemo       Boolean  @default(false)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id              String                  @id @default(cuid())
+  rfqId           String
+  fileName        String
+  documentType    String?
+  storageKey      String?
+  localPath       String?
+  sourceUrl       String?
+  format          String?
+  pageCount       Int?
+  byteSize        Int?
+  contentHash     String?
+  retrievedAt     DateTime?
+  extractedAt     DateTime?
+  processingState DocumentProcessingState @default(PENDING)
+  extractedText   String?
+  isSource        Boolean                 @default(true)
+  notes           String?
+  isDemo          Boolean                 @default(false)
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
 
-  rfq Rfq @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  rfq       Rfq           @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  lineItems RfqLineItem[]
 
   @@index([rfqId])
+  @@index([contentHash])
 }
 
 model SupplierQuote {
-  id              String   @id @default(cuid())
-  rfqId           String
-  supplierId      String
-  quoteReference  String?
-  receivedAt      DateTime @default(now())
-  validUntil      DateTime?
-  currency        String   @default("ZAR")
-  deliveryCost    Decimal  @default(0)
-  leadTimeDays    Int?
-  paymentTerms    String?
-  vatIncluded     Boolean?
-  notes           String?
-  isComplete      Boolean  @default(false)
-  isDemo          Boolean  @default(false)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id               String            @id @default(cuid())
+  rfqId            String
+  supplierId       String
+  quoteReference   String?
+  quoteDate        DateTime?
+  receivedAt       DateTime          @default(now())
+  validUntil       DateTime?
+  currency         String            @default("ZAR")
+  /// Null means delivery cost UNKNOWN — never treat as free.
+  deliveryCost     Decimal?
+  deliveryKnown    Boolean           @default(false)
+  leadTimeDays     Int?
+  paymentTerms     String?
+  /// Null means VAT treatment UNKNOWN — never invent.
+  vatIncluded      Boolean?
+  vatKnown         Boolean           @default(false)
+  subtotal         Decimal?
+  vatAmount        Decimal?
+  totalAmount      Decimal?
+  evidenceType     QuoteEvidenceType @default(UNKNOWN)
+  verificationState ExtractionVerification @default(UNVERIFIED)
+  sourceDocumentPath String?
+  notes            String?
+  isComplete       Boolean           @default(false)
+  isDemo           Boolean           @default(false)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
 
   rfq       Rfq                    @relation(fields: [rfqId], references: [id], onDelete: Cascade)
   supplier  Supplier               @relation(fields: [supplierId], references: [id])
@@ -436,54 +530,92 @@ model SupplierQuote {
 
   @@index([rfqId])
   @@index([supplierId])
+  @@index([evidenceType])
 }
 
 model SupplierQuoteLineItem {
-  id              String   @id @default(cuid())
-  supplierQuoteId String
-  rfqLineItemId   String?
-  description     String
-  quantity        Decimal
-  unitCost        Decimal
-  lineTotal       Decimal
-  brandOffered    String?
-  notes           String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id                String         @id @default(cuid())
+  supplierQuoteId   String
+  rfqLineItemId     String?
+  description       String
+  quantity          Decimal
+  /// Null means unit price UNKNOWN — never invent zero.
+  unitCost          Decimal?
+  priceKnown        Boolean        @default(false)
+  lineTotal         Decimal?
+  brandOffered      String?
+  modelOffered      String?
+  sku               String?
+  matchState        SpecMatchState @default(UNKNOWN)
+  mappingConfidence Float?
+  mappingNotes      String?
+  availability      String?
+  leadTimeDays      Int?
+  notes             String?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
 
   supplierQuote SupplierQuote @relation(fields: [supplierQuoteId], references: [id], onDelete: Cascade)
   rfqLineItem   RfqLineItem?  @relation(fields: [rfqLineItemId], references: [id])
 
   @@index([supplierQuoteId])
+  @@index([rfqLineItemId])
+}
+
+model SupplierEnquiry {
+  id             String               @id @default(cuid())
+  rfqId          String
+  supplierId     String
+  subject        String
+  body           String
+  deliveryState  EnquiryDeliveryState @default(DRAFT_NOT_SENT)
+  productsSummary String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  rfq      Rfq      @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  supplier Supplier @relation(fields: [supplierId], references: [id])
+
+  @@index([rfqId])
+  @@index([supplierId])
 }
 
 model PricingScenario {
-  id                String             @id @default(cuid())
-  rfqId             String
-  name              String             @default("Primary")
-  markupPercent     Decimal            @default(20)
-  supplierCostTotal Decimal            @default(0)
-  deliveryCost      Decimal            @default(0)
-  logisticsCost     Decimal            @default(0)
-  packagingCost     Decimal            @default(0)
-  insuranceCost     Decimal            @default(0)
-  financingCost     Decimal            @default(0)
-  contingencyCost   Decimal            @default(0)
-  otherDirectCosts  Decimal            @default(0)
-  landedCost        Decimal            @default(0)
-  sellingPriceExVat Decimal            @default(0)
-  vatAmount         Decimal            @default(0)
-  totalQuotation    Decimal            @default(0)
-  grossProfit       Decimal            @default(0)
-  grossMarginPercent Decimal           @default(0)
-  workingCapitalRequired Decimal       @default(0)
-  profitabilityGate ProfitabilityGate  @default(UNREVIEWED)
-  vatRegisteredSnapshot Boolean?
-  notes             String?
-  isSelected        Boolean            @default(false)
-  isDemo            Boolean            @default(false)
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
+  id                     String             @id @default(cuid())
+  rfqId                  String
+  name                   String             @default("Primary")
+  markupPercent          Decimal            @default(20)
+  supplierCostTotal      Decimal            @default(0)
+  /// Supplier invoice may include irrecoverable input VAT for non-VAT companies.
+  supplierInputVatCost   Decimal            @default(0)
+  deliveryCost           Decimal            @default(0)
+  logisticsCost          Decimal            @default(0)
+  packagingCost          Decimal            @default(0)
+  insuranceCost          Decimal            @default(0)
+  financingCost          Decimal            @default(0)
+  contingencyCost        Decimal            @default(0)
+  otherDirectCosts       Decimal            @default(0)
+  landedCost             Decimal            @default(0)
+  sellingPriceExVat      Decimal            @default(0)
+  vatAmount              Decimal            @default(0)
+  totalQuotation         Decimal            @default(0)
+  grossProfit            Decimal            @default(0)
+  grossMarginPercent     Decimal            @default(0)
+  workingCapitalRequired Decimal            @default(0)
+  upfrontCashRequired    Decimal            @default(0)
+  expectedRecoveryDays   Int?
+  supplierPaymentTerms   String?
+  buyerPaymentTerms      String?
+  financingAssumption    String?
+  evidenceQuality        String?
+  profitabilityGate      ProfitabilityGate  @default(UNREVIEWED)
+  profitabilityReasons   String?
+  vatRegisteredSnapshot  Boolean?
+  notes                  String?
+  isSelected             Boolean            @default(false)
+  isDemo                 Boolean            @default(false)
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
 
   rfq       Rfq               @relation(fields: [rfqId], references: [id], onDelete: Cascade)
   lineItems PricingLineItem[]

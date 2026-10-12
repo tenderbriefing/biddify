@@ -3,12 +3,23 @@ import type { PipelineStatus } from "./status";
 import { evaluateDeadline } from "./deadlines";
 
 export const NEXT_ACTIONS = [
+  "DOWNLOAD_DOCUMENTS",
   "REVIEW_DOCUMENTS",
+  "VERIFY_EXTRACTION",
   "VERIFY_COMPULSORY_BRIEFING",
   "SELECT_BIDDING_COMPANY",
   "SOURCE_SUPPLIERS",
+  "REQUEST_QUOTES",
+  "AWAIT_QUOTES",
+  "COMPARE_QUOTES",
+  "VERIFY_PRODUCT_MATCH",
+  "CALCULATE_LOGISTICS",
+  "REVIEW_PRICING",
+  "VERIFY_WORKING_CAPITAL",
+  "VERIFY_OEM_AUTHORIZATION",
   "VERIFY_LICENCE",
   "CONFIRM_DELIVERY",
+  "READY_FOR_COMMERCIAL_REVIEW",
   "NO_BID",
   "READY_FOR_SOURCING",
   "COMPLETE_COMPLIANCE",
@@ -22,6 +33,7 @@ export type NextAction = (typeof NEXT_ACTIONS)[number];
 export type NextActionInput = {
   status: PipelineStatus;
   qualificationGate: "GREEN" | "AMBER" | "RED" | "UNREVIEWED";
+  commercialGate?: "GREEN" | "AMBER" | "RED" | "UNREVIEWED" | null;
   hardNoBid: boolean;
   classification?: OpportunityClass | null;
   selectedCompanyId?: string | null;
@@ -30,7 +42,19 @@ export type NextActionInput = {
   briefingDate?: Date | null;
   briefingAttendanceEvidence?: boolean;
   documentCount: number;
+  documentsDownloaded?: boolean;
+  extractionDone?: boolean;
+  extractionVerified?: boolean;
+  lineItemCount?: number;
+  supplierCount?: number;
+  enquiryDraftCount?: number;
+  quoteCount?: number;
+  hasSupplierQuote?: boolean;
+  pricingComplete?: boolean;
+  productMatchVerified?: boolean;
+  logisticsCalculated?: boolean;
   hasOemRequirement?: boolean;
+  oemVerified?: boolean;
   closingAt: Date;
   now?: Date;
 };
@@ -38,7 +62,7 @@ export type NextActionInput = {
 export type NextActionResult = {
   action: NextAction;
   reason: string;
-  priority: number; // higher = more urgent on dashboard
+  priority: number;
 };
 
 export function determineNextAction(input: NextActionInput): NextActionResult {
@@ -52,16 +76,44 @@ export function determineNextAction(input: NextActionInput): NextActionResult {
   if (input.hardNoBid || input.qualificationGate === "RED") {
     return {
       action: "NO_BID",
-      reason: "Hard disqualifier or RED qualification — record NO BID or Founder override",
+      reason: "Hard disqualifier or RED qualification",
       priority: 100,
     };
   }
 
   if (deadline.isClosed) {
+    return { action: "NO_BID", reason: "Deadline passed", priority: 100 };
+  }
+
+  if (input.documentCount === 0) {
     return {
-      action: "NO_BID",
-      reason: "Deadline passed",
-      priority: 100,
+      action: "DOWNLOAD_DOCUMENTS",
+      reason: "No source documents available",
+      priority: 95,
+    };
+  }
+
+  if (!input.documentsDownloaded) {
+    return {
+      action: "DOWNLOAD_DOCUMENTS",
+      reason: "Retrieve and store source RFQ documents",
+      priority: 94,
+    };
+  }
+
+  if (!input.extractionDone || (input.lineItemCount ?? 0) === 0) {
+    return {
+      action: "REVIEW_DOCUMENTS",
+      reason: "Extract and review line items from source documents",
+      priority: 92,
+    };
+  }
+
+  if (!input.extractionVerified) {
+    return {
+      action: "VERIFY_EXTRACTION",
+      reason: "Critical extracted values remain UNVERIFIED",
+      priority: 90,
     };
   }
 
@@ -73,66 +125,95 @@ export function determineNextAction(input: NextActionInput): NextActionResult {
     return {
       action: "VERIFY_COMPULSORY_BRIEFING",
       reason: "Compulsory briefing requires verification",
-      priority: 95,
+      priority: 89,
     };
   }
 
-  if (input.documentCount === 0 || input.status === "NEW") {
+  if (input.hasOemRequirement && !input.oemVerified) {
     return {
-      action: "REVIEW_DOCUMENTS",
-      reason: "Review source documents and confirm requirements",
-      priority: deadline.hoursRemaining < 72 ? 90 : 70,
-    };
-  }
-
-  if (input.hasOemRequirement) {
-    return {
-      action: "VERIFY_LICENCE",
-      reason: "OEM / authorisation requirement must be verified",
-      priority: 85,
+      action: "VERIFY_OEM_AUTHORIZATION",
+      reason: "OEM / authorised status must be assessed (not automatic NO BID)",
+      priority: 88,
     };
   }
 
   if (!input.selectedCompanyId) {
     return {
       action: "SELECT_BIDDING_COMPANY",
-      reason: "Select eligible bidding company before sourcing",
+      reason: "Select bidding company before commercial finalisation",
+      priority: 86,
+    };
+  }
+
+  if ((input.supplierCount ?? 0) === 0) {
+    return {
+      action: "SOURCE_SUPPLIERS",
+      reason: "Identify real suppliers for required products",
+      priority: 84,
+    };
+  }
+
+  if ((input.enquiryDraftCount ?? 0) === 0) {
+    return {
+      action: "REQUEST_QUOTES",
+      reason: "Prepare supplier RFQ drafts (DRAFT_NOT_SENT)",
+      priority: 82,
+    };
+  }
+
+  if ((input.quoteCount ?? 0) === 0) {
+    return {
+      action: "AWAIT_QUOTES",
+      reason: "No quote/price evidence recorded yet",
       priority: 80,
     };
   }
 
-  if (input.qualificationGate === "UNREVIEWED" || input.qualificationGate === "AMBER") {
+  if (!input.productMatchVerified) {
     return {
-      action: "MANUAL_REVIEW",
-      reason: "Qualification needs operator review",
-      priority: 75,
+      action: "VERIFY_PRODUCT_MATCH",
+      reason: "Verify supplier products against RFQ specifications",
+      priority: 78,
     };
   }
 
-  if (input.status === "FOUNDER_REVIEW") {
+  if ((input.quoteCount ?? 0) > 0 && !input.pricingComplete) {
     return {
-      action: "FOUNDERS_REVIEW",
-      reason: "Awaiting Founder approval",
-      priority: 88,
+      action: "COMPARE_QUOTES",
+      reason: "Compare quotes and select sourcing mix",
+      priority: 76,
     };
   }
 
-  if (["COMPLIANCE", "PRICING"].includes(input.status)) {
+  if (!input.logisticsCalculated) {
     return {
-      action: "COMPLETE_COMPLIANCE",
-      reason: "Complete compliance / pricing gates",
+      action: "CALCULATE_LOGISTICS",
+      reason: "Include delivery/logistics in landed cost",
+      priority: 74,
+    };
+  }
+
+  if (!input.pricingComplete) {
+    return {
+      action: "REVIEW_PRICING",
+      reason: "Complete markup, margin and bid price scenario",
+      priority: 72,
+    };
+  }
+
+  if (input.commercialGate === "AMBER" || input.commercialGate === "UNREVIEWED") {
+    return {
+      action: "VERIFY_WORKING_CAPITAL",
+      reason: "Review working capital and commercial gate before Founder review",
       priority: 70,
     };
   }
 
-  if (
-    input.qualificationGate === "GREEN" &&
-    ["QUALIFIED", "REVIEW", "SOURCING"].includes(input.status)
-  ) {
+  if (input.status === "FOUNDER_REVIEW" || input.commercialGate === "GREEN") {
     return {
-      action: input.status === "SOURCING" ? "SOURCE_SUPPLIERS" : "READY_FOR_SOURCING",
-      reason: "Qualified — proceed to supplier sourcing",
-      priority: 65,
+      action: "READY_FOR_COMMERCIAL_REVIEW",
+      reason: "Commercial pack ready for Founder review",
+      priority: 68,
     };
   }
 
@@ -145,8 +226,8 @@ export function determineNextAction(input: NextActionInput): NextActionResult {
   }
 
   return {
-    action: "REVIEW_DOCUMENTS",
-    reason: "Continue document and requirement review",
+    action: "READY_FOR_COMMERCIAL_REVIEW",
+    reason: "Proceed to Founder commercial review",
     priority: 50,
   };
 }

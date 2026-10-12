@@ -49,6 +49,8 @@ next-env.d.ts
 /prisma/*.db-journal
 /prisma/dev.db*
 /prisma/test-phase2.db*
+/storage/
+/tmp/
 
 # OS / IDE
 .idea
