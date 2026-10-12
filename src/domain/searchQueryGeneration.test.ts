@@ -10,9 +10,21 @@ describe("search query generation", () => {
       technicalSpecifications: ["1.5V", "aaa"],
     });
     expect(qs.length).toBeGreaterThanOrEqual(2);
-    expect(qs.every((q) => q.query.includes("South Africa"))).toBe(true);
+    expect(qs.some((q) => q.query.includes("South Africa"))).toBe(true);
     expect(qs.some((q) => /Duracell/i.test(q.query))).toBe(true);
+    expect(qs.some((q) => /alkaline battery/i.test(q.query))).toBe(true);
     expect(qs[0].reason.length).toBeGreaterThan(0);
     expect(qs[0].lineNumber).toBe(5);
+  });
+
+  it("uses short brand+category for laptops without pack noise", () => {
+    const qs = generateProductSearchQueries({
+      lineNumber: 1,
+      description: "Dell Laptop notebook computer business grade Windows 11 Pro",
+      brandRequirement: "Dell",
+      unit: "EA",
+    });
+    expect(qs.some((q) => q.query === "Dell laptop")).toBe(true);
+    expect(qs.every((q) => !/\bpack\b/i.test(q.query))).toBe(true);
   });
 });

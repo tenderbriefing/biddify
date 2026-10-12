@@ -25,6 +25,10 @@ export type GuardrailLine = {
   packResolved?: boolean;
   vatMaterialUnknown?: boolean;
   deliveryMaterialUnknown?: boolean;
+  /** Commercial integrity V1 */
+  quantityReconciled?: boolean;
+  priceBasisKnown?: boolean;
+  packEconomicsPassed?: boolean;
 };
 
 export type GuardrailInput = {
@@ -38,6 +42,11 @@ export type GuardrailInput = {
   autoQuotedConfidenceFloor?: number;
   classificationConfident?: boolean;
   boqComplete?: boolean;
+  /** Commercial integrity gate — required for AUTO_QUOTED V3 */
+  commercialIntegrityPassed?: boolean;
+  commercialIntegrityFailures?: string[];
+  livePricingCredible?: boolean;
+  unexplainedExtremeVariance?: boolean;
 };
 
 export type GuardrailResult = {
@@ -150,6 +159,15 @@ export function classifyAutonomousOutcome(
     if (line.packResolved === false || line.flags.includes("PACK_SIZE_AMBIGUITY")) {
       reasons.push(`Line ${line.lineNumber}: pack size unresolved`);
     }
+    if (line.quantityReconciled === false) {
+      reasons.push(`Line ${line.lineNumber}: quantity reconciliation failed`);
+    }
+    if (line.priceBasisKnown === false) {
+      reasons.push(`Line ${line.lineNumber}: price basis unknown`);
+    }
+    if (line.packEconomicsPassed === false) {
+      reasons.push(`Line ${line.lineNumber}: pack economics not passed`);
+    }
     if (line.vatMaterialUnknown) {
       reasons.push(`Line ${line.lineNumber}: VAT uncertainty material`);
     }
@@ -181,6 +199,20 @@ export function classifyAutonomousOutcome(
   if (input.confidence < floor) {
     reasons.push(
       `Confidence ${input.confidence.toFixed(2)} below AUTO_QUOTED floor ${floor}`,
+    );
+  }
+
+  if (input.livePricingCredible === false) {
+    reasons.push("Live pricing not credible for autonomous quotation");
+  }
+
+  if (input.unexplainedExtremeVariance) {
+    reasons.push("Unexplained EXTREME_VARIANCE vs historical comparator");
+  }
+
+  if (input.commercialIntegrityPassed === false) {
+    reasons.push(
+      `Commercial integrity gate failed: ${(input.commercialIntegrityFailures ?? []).join("; ") || "see audit"}`,
     );
   }
 

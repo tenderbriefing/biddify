@@ -46,9 +46,9 @@ import type { LiveResearchEvent } from "@/services/research/liveWebProvider";
 import { validateMultiSourcePrices } from "@/domain/multiSourcePricing";
 import {
   assessDeliveryMateriality,
-  deliveryRiskAllowance,
   type DeliveryEvidence,
 } from "@/domain/deliveryEvidence";
+import { classifyDeliveryV2 } from "@/domain/deliveryMaterialityV2";
 import { buildRiskAllowances } from "@/domain/riskAllowance";
 import {
   scoreLineResearchConfidence,
@@ -61,6 +61,21 @@ import {
   freshnessBand,
   isUsableForAutonomousPricing,
 } from "@/domain/researchPolicy";
+import { reconcileQuantity } from "@/domain/quantityReconciliation";
+import {
+  extractPackSemantics,
+  isFirmPackEvidence,
+} from "@/domain/packExtraction";
+import { isFirmPriceBasis } from "@/domain/priceBasis";
+import { classifyPriceVariance } from "@/domain/priceVariancePolicy";
+import { normalizeSupplierPriceForComparison } from "@/domain/vatNormalization";
+import {
+  buildLineWaterfall,
+  buildRfqWaterfall,
+} from "@/domain/costWaterfall";
+import { evaluateCommercialIntegrity } from "@/domain/commercialIntegrity";
+import { selectProcurementCost } from "@/domain/procurementCostStrategy";
+import type { QuantityReconciliation } from "@/domain/quantityReconciliation";
 
 export type ProcessResult = {
   rfqId: string;
@@ -98,6 +113,11 @@ type RunArtifacts = {
   outcome?: unknown;
   guardrails?: unknown;
   webResearchCoverage?: number;
+  quantityReconciliations?: unknown;
+  commercialIntegrity?: unknown;
+  costWaterfall?: unknown;
+  priceVariance?: unknown;
+  integrityMetrics?: unknown;
 };
 
 async function transition(
@@ -244,7 +264,7 @@ export async function processClaimedRfq(
         },
       },
       selectedCompany: true,
-      pricingScenarios: { where: { isSelected: true }, take: 1 },
+      pricingScenarios: { orderBy: { createdAt: "desc" }, take: 3 },
     },
   });
 
@@ -718,14 +738,23 @@ export async function processClaimedRfq(
       evidenceLevel: string;
       matchVerdict: string;
       candidateId: string | null;
+      reconciliation?: QuantityReconciliation | null;
     };
 
     const pricedLines: PricedLine[] = [];
+    const integrityLines: Parameters<
+      typeof evaluateCommercialIntegrity
+    >[0]["lines"] = [];
+    const reconciliations: QuantityReconciliation[] = [];
     let totalProductCost = 0;
     let anyDeliveryKnown = false;
     let deliveryTotal = 0;
+    let deliveryAllowanceTotal = 0;
     let packAmbiguity = false;
     let evidenceWeak = false;
+    let vatAcceptable = true;
+    let deliveryV2Blocks = false;
+    let deliveryV2Summary: ReturnType<typeof classifyDeliveryV2> | null = null;
 
     for (const line of normalized) {
       const { candidates, lineItemId } = researchByLine[line.lineNumber];
@@ -750,7 +779,26 @@ export async function processClaimedRfq(
           ...match,
         });
 
-        const packCalc = c.rawEvidence?.packCalculation ?? null;
+        const packExtract = extractPackSemantics({
+          productName: c.productName,
+          description: String(c.rawEvidence?.description ?? ""),
+          tenderUnit: line.unit,
+          explicitPackSize: c.packSize,
+        });
+        const previewRecon =
+          c.priceKnown && c.price != null
+            ? reconcileQuantity({
+                tenderQuantity: line.quantity,
+                tenderUnit: line.unit,
+                productName: c.productName,
+                productDescription: String(c.rawEvidence?.description ?? ""),
+                observedSupplierPrice: c.price,
+                explicitPackSize: c.packSize,
+              })
+            : null;
+        const effectiveFromRecon =
+          previewRecon?.effectiveTenderUnitCost ?? c.effectiveUnitCost;
+        const packCalc = previewRecon ?? c.rawEvidence?.packCalculation ?? null;
         const deliveryEv = c.rawEvidence?.delivery ?? null;
         const sourceQuality =
           typeof c.rawEvidence?.sourceQuality === "number"
@@ -772,16 +820,20 @@ export async function processClaimedRfq(
             price: c.price,
             priceKnown: c.priceKnown,
             vatTreatment: c.vatTreatment,
-            packSize: c.packSize,
-            packUnit: c.packUnit,
-            effectiveUnitCost: c.effectiveUnitCost,
+            packSize: packExtract.packSize ?? c.packSize,
+            packUnit: packExtract.supplierSellingUnit,
+            effectiveUnitCost: effectiveFromRecon,
             availability: c.availability,
             deliveryCost: c.deliveryCost,
             deliveryKnown: c.deliveryKnown,
             evidenceLevel: c.evidenceLevel,
             retrievedAt: c.retrievedAt,
             evidenceAgeHours: c.evidenceAgeHours,
-            rawEvidenceJson: JSON.stringify(c.rawEvidence),
+            rawEvidenceJson: JSON.stringify({
+              ...c.rawEvidence,
+              packExtraction: packExtract,
+              quantityReconciliation: previewRecon,
+            }),
             matchVerdict: match.verdict,
             matchConfidence: match.confidence,
             matchReasoning: match.reasoning,
@@ -793,7 +845,9 @@ export async function processClaimedRfq(
             ),
             researchProvider: String(c.rawEvidence?.provider ?? "unknown"),
             sourceQuality,
-            priceType: String(c.rawEvidence?.priceType ?? null),
+            priceType: String(
+              c.rawEvidence?.priceType ?? packExtract.priceUnit ?? null,
+            ),
             packCalculationJson: packCalc ? JSON.stringify(packCalc) : null,
             deliveryJson: deliveryEv ? JSON.stringify(deliveryEv) : null,
             selectionStatus: "ALTERNATIVE",
@@ -807,17 +861,17 @@ export async function processClaimedRfq(
           matchConfidence: match.confidence,
           evidenceLevel: c.evidenceLevel,
           evidenceAgeHours: c.evidenceAgeHours,
-          effectiveUnitCost: c.effectiveUnitCost,
-          priceKnown: c.priceKnown,
+          effectiveUnitCost: effectiveFromRecon,
+          priceKnown: Boolean(c.priceKnown && c.price != null),
           availabilityKnown: Boolean(c.availability),
-          packSizeCorrect:
-            !packCalc ||
-            (packCalc as { flag?: string }).flag === "OK" ||
-            (packCalc as { flag?: string }).flag === "UNIT_PRICE",
+          packSizeCorrect: isFirmPackEvidence(packExtract),
           deliveryKnown: c.deliveryKnown,
           sourceCredibility: sourceQuality,
+          firmRecon: Boolean(previewRecon?.firm),
           _candidate: c,
           _match: match,
+          _packExtract: packExtract,
+          _previewRecon: previewRecon,
         });
       }
 
@@ -831,30 +885,47 @@ export async function processClaimedRfq(
         prisma,
       );
 
+      const firmForCompare = scoredInputs.filter(
+        (s) => s.priceKnown && s.effectiveUnitCost != null && s.firmRecon,
+      );
       const multi = validateMultiSourcePrices(
-        scoredInputs
-          .filter((s) => s.priceKnown && s.effectiveUnitCost != null)
-          .map((s) => ({
-            id: s.id,
-            price: s.effectiveUnitCost as number,
-            sourceQuality: s.sourceCredibility,
-            matchSelectable: mayAutoSelect(s.matchVerdict),
-            freshnessOk: isUsableForAutonomousPricing(
-              freshnessBand(
-                ageDaysFromRetrieved(
-                  s._candidate.retrievedAt,
-                  new Date(),
-                ),
-              ),
+        (firmForCompare.length > 0 ? firmForCompare : scoredInputs.filter(
+          (s) => s.priceKnown && s.effectiveUnitCost != null,
+        )).map((s) => ({
+          id: s.id,
+          price: s.effectiveUnitCost as number,
+          sourceQuality: s.sourceCredibility,
+          matchSelectable: mayAutoSelect(s.matchVerdict),
+          freshnessOk: isUsableForAutonomousPricing(
+            freshnessBand(
+              ageDaysFromRetrieved(s._candidate.retrievedAt, new Date()),
             ),
-            packResolved: s.packSizeCorrect,
-            flags:
-              s.sourceCredibility < 0.4 ? ["WEAK_SOURCE"] : undefined,
-          })),
+          ),
+          packResolved: s.packSizeCorrect,
+          flags: s.sourceCredibility < 0.4 ? ["WEAK_SOURCE"] : undefined,
+        })),
         {
           highValueLine:
             (scoredInputs[0]?.effectiveUnitCost ?? 0) * line.quantity >=
             RESEARCH_POLICY.multiSource.highValueLineThresholdZar,
+        },
+      );
+
+      const costPick = selectProcurementCost(
+        scoredInputs
+          .filter((s) => s.firmRecon && s.effectiveUnitCost != null)
+          .map((s) => ({
+            id: s.id,
+            effectiveUnitCost: s.effectiveUnitCost as number,
+            sourceQuality: s.sourceCredibility,
+            firm: true,
+          })),
+        {
+          highConfidence: scoredInputs.some(
+            (s) => s.sourceCredibility >= 0.7 && s.firmRecon,
+          ),
+          highDispersion:
+            multi.dispersionCv != null && multi.dispersionCv >= 0.35,
         },
       );
 
@@ -881,12 +952,19 @@ export async function processClaimedRfq(
 
       let selectedCandidate: ResearchCandidate | null = null;
       let selectedId: string | null =
-        multi.selectedId && mayAutoSelect(
-          scoredInputs.find((s) => s.id === multi.selectedId)?.matchVerdict ??
+        costPick.selectedId &&
+        mayAutoSelect(
+          scoredInputs.find((s) => s.id === costPick.selectedId)?.matchVerdict ??
             "INSUFFICIENT_INFORMATION",
         )
-          ? multi.selectedId
-          : selection.selectedId;
+          ? costPick.selectedId
+          : multi.selectedId &&
+              mayAutoSelect(
+                scoredInputs.find((s) => s.id === multi.selectedId)
+                  ?.matchVerdict ?? "INSUFFICIENT_INFORMATION",
+              )
+            ? multi.selectedId
+            : selection.selectedId;
 
       if (!selectedId) {
         const soft = scoredInputs
@@ -898,6 +976,7 @@ export async function processClaimedRfq(
           )
           .sort(
             (a, b) =>
+              Number(b.firmRecon) - Number(a.firmRecon) ||
               (b.matchConfidence || 0) - (a.matchConfidence || 0) ||
               (a.effectiveUnitCost ?? 9999) - (b.effectiveUnitCost ?? 9999),
           )[0];
@@ -966,18 +1045,108 @@ export async function processClaimedRfq(
         );
       }
 
-      const unitCost = selectedCandidate?.effectiveUnitCost ?? null;
-      const priceKnown = Boolean(selectedCandidate?.priceKnown && unitCost != null);
+      const selectedScored = scoredInputs.find((s) => s.id === selectedId);
+      const recon: QuantityReconciliation | null =
+        selectedCandidate && selectedCandidate.price != null
+          ? reconcileQuantity({
+              tenderQuantity: line.quantity,
+              tenderUnit: line.unit,
+              productName: selectedCandidate.productName,
+              productDescription: String(
+                selectedCandidate.rawEvidence?.description ?? "",
+              ),
+              observedSupplierPrice: selectedCandidate.price,
+              explicitPackSize: selectedCandidate.packSize,
+            })
+          : selectedScored?._previewRecon ?? null;
+
+      if (recon) {
+        reconciliations.push(recon);
+        await writeAuditEvent(
+          {
+            action: "QUANTITY_RECONCILED",
+            entityType: "Rfq",
+            entityId: rfq.id,
+            metadata: {
+              lineNumber: line.lineNumber,
+              firm: recon.firm,
+              packsRequired: recon.packsRequired,
+              procurementCost: recon.procurementCost,
+              humanReadable: recon.humanReadable,
+            },
+          },
+          prisma,
+        );
+        await writeAuditEvent(
+          {
+            action: "PACK_SIZE_NORMALIZED",
+            entityType: "Rfq",
+            entityId: rfq.id,
+            metadata: {
+              lineNumber: line.lineNumber,
+              pack: recon.packExtraction,
+            },
+          },
+          prisma,
+        );
+        await writeAuditEvent(
+          {
+            action: "PRICE_BASIS_NORMALIZED",
+            entityType: "Rfq",
+            entityId: rfq.id,
+            metadata: {
+              lineNumber: line.lineNumber,
+              basis: recon.supplierPriceBasis,
+            },
+          },
+          prisma,
+        );
+      }
+
+      if (selectedId && recon) {
+        await prisma.productResearchCandidate.update({
+          where: { id: selectedId },
+          data: {
+            packCalculationJson: JSON.stringify(recon),
+            packSize: recon.supplierPackSize,
+            packUnit: recon.supplierSellingUnit,
+            effectiveUnitCost: recon.effectiveTenderUnitCost,
+            selectionReason: [
+              selectedScored
+                ? selection.reason
+                : null,
+              costPick.reason,
+              recon.reasoning,
+            ]
+              .filter(Boolean)
+              .join(" | "),
+          },
+        });
+      }
+
+      const unitCost = recon?.effectiveTenderUnitCost ?? selectedCandidate?.effectiveUnitCost ?? null;
+      const priceKnown = Boolean(
+        selectedCandidate?.priceKnown &&
+          recon?.firm &&
+          recon.procurementCost != null,
+      );
       const deliveryEv = (selectedCandidate?.rawEvidence?.delivery ?? {
         type: "UNKNOWN_DELIVERY",
         amount: null,
+        threshold: null,
+        destinationAssumption: null,
+        source: null,
         known: false,
         notes: [],
       }) as DeliveryEvidence;
 
+      const productCostFromRecon = recon?.firm
+        ? (recon.procurementCost ?? 0)
+        : 0;
+
       const landed = calculateLineLandedCost({
         tenderQuantity: line.quantity,
-        unitCost,
+        unitCost: recon?.firm ? unitCost : null,
         priceKnown,
         deliveryKnown: deliveryEv.known === true,
         deliveryCost: deliveryEv.known ? deliveryEv.amount : null,
@@ -985,14 +1154,34 @@ export async function processClaimedRfq(
           selectedCandidate?.vatTreatment !== "UNKNOWN" &&
           selectedCandidate?.vatTreatment != null,
         availabilityKnown: Boolean(selectedCandidate?.availability),
-        supplierPackSize: selectedCandidate?.packSize,
+        supplierPackSize: recon?.supplierPackSize,
         packPrice:
-          selectedCandidate?.packSize && selectedCandidate.packSize > 1
+          recon?.supplierPackSize &&
+          recon.supplierPackSize > 1 &&
+          selectedCandidate?.price != null
             ? selectedCandidate.price
             : null,
       });
 
+      // Prefer quantity-reconciled procurement cost when firm
+      if (recon?.firm && recon.procurementCost != null) {
+        landed.productCost = recon.procurementCost;
+        landed.packsRequired = recon.packsRequired;
+        landed.unresolved = false;
+      } else if (recon && !recon.firm) {
+        landed.unresolved = true;
+        landed.productCost = 0;
+        landed.flags.push("PACK_SIZE_AMBIGUITY");
+        packAmbiguity = true;
+      }
+
       if (landed.flags.includes("PACK_SIZE_AMBIGUITY")) packAmbiguity = true;
+
+      const lineDeliveryV2 = classifyDeliveryV2({
+        delivery: deliveryEv,
+        productCost: landed.productCost || productCostFromRecon,
+      });
+      // Legacy band for compatibility
       const deliveryMateriality = assessDeliveryMateriality(
         landed.productCost || (unitCost ?? 0) * line.quantity,
         deliveryEv,
@@ -1001,6 +1190,12 @@ export async function processClaimedRfq(
         anyDeliveryKnown = true;
         deliveryTotal += deliveryEv.amount;
       }
+      if (lineDeliveryV2.allowance > 0) {
+        deliveryAllowanceTotal += lineDeliveryV2.allowance;
+      }
+      if (lineDeliveryV2.blocksAutoQuoted) deliveryV2Blocks = true;
+      deliveryV2Summary = lineDeliveryV2;
+
       await writeAuditEvent(
         {
           action: "DELIVERY_EVIDENCE_CAPTURED",
@@ -1010,10 +1205,41 @@ export async function processClaimedRfq(
             lineNumber: line.lineNumber,
             delivery: deliveryEv,
             materiality: deliveryMateriality,
+            deliveryV2: lineDeliveryV2,
           },
         },
         prisma,
       );
+      await writeAuditEvent(
+        {
+          action: "DELIVERY_MATERIALITY_ASSESSED",
+          entityType: "Rfq",
+          entityId: rfq.id,
+          metadata: {
+            lineNumber: line.lineNumber,
+            class: lineDeliveryV2.class,
+            blocks: lineDeliveryV2.blocksAutoQuoted,
+          },
+        },
+        prisma,
+      );
+
+      const vatNorm = normalizeSupplierPriceForComparison({
+        price: selectedCandidate?.price ?? 0,
+        vatBasis:
+          selectedCandidate?.vatTreatment === "INCLUSIVE" ||
+          selectedCandidate?.vatTreatment === "VAT_INCLUSIVE"
+            ? "VAT_INCLUSIVE"
+            : selectedCandidate?.vatTreatment === "EXCLUSIVE" ||
+                selectedCandidate?.vatTreatment === "VAT_EXCLUSIVE"
+              ? "VAT_EXCLUSIVE"
+              : selectedCandidate?.vatTreatment === "NON_VAT"
+                ? "NON_VAT"
+                : "UNKNOWN",
+      });
+      if (!vatNorm.usable && selectedCandidate?.priceKnown) {
+        vatAcceptable = false;
+      }
 
       if (!priceKnown) evidenceWeak = true;
       totalProductCost += landed.productCost;
@@ -1030,12 +1256,8 @@ export async function processClaimedRfq(
         sourceCount: Math.min(1, multi.count / 3),
         priceConsistency:
           multi.dispersionCv != null && multi.dispersionCv < 0.25 ? 0.85 : 0.45,
-        vatClarity:
-          selectedCandidate?.vatTreatment &&
-          selectedCandidate.vatTreatment !== "UNKNOWN"
-            ? 0.8
-            : 0.3,
-        packClarity: landed.flags.includes("PACK_SIZE_AMBIGUITY") ? 0.3 : 0.85,
+        vatClarity: vatNorm.usable ? 0.8 : 0.3,
+        packClarity: recon?.firm ? 0.9 : 0.3,
         availability: selectedCandidate?.availability ? 0.8 : 0.4,
         deliveryEvidence: deliveryEv.known ? 0.9 : 0.2,
         freshness: isUsableForAutonomousPricing(
@@ -1053,10 +1275,20 @@ export async function processClaimedRfq(
       const lineFlags = [
         ...landed.flags,
         ...multi.flags,
-        ...(deliveryMateriality.band === "MATERIAL"
+        ...(recon?.flags ?? []),
+        ...(lineDeliveryV2.blocksAutoQuoted
           ? ["DELIVERY_MATERIAL_UNKNOWN"]
           : []),
+        `PROCUREMENT_COST_SELECTION_REASON:${costPick.reason}`,
       ];
+
+      const qtyOk = Boolean(recon?.firm);
+      const basisOk = Boolean(
+        recon && isFirmPriceBasis(recon.supplierPriceBasis),
+      );
+      const packOk = Boolean(
+        recon && isFirmPackEvidence(recon.packExtraction),
+      );
 
       guardrailLines.push({
         lineNumber: line.lineNumber,
@@ -1068,14 +1300,24 @@ export async function processClaimedRfq(
         lineConfidence: lineConf.score,
         liveEvidence: researchByLine[line.lineNumber].liveCount > 0,
         multiSource: multi.count >= 2,
-        packResolved: !landed.flags.includes("PACK_SIZE_AMBIGUITY"),
-        vatMaterialUnknown:
-          !selectedCandidate?.vatTreatment ||
-          selectedCandidate.vatTreatment === "UNKNOWN",
-        deliveryMaterialUnknown: deliveryMateriality.band === "MATERIAL",
+        packResolved: packOk,
+        vatMaterialUnknown: !vatNorm.usable,
+        deliveryMaterialUnknown: lineDeliveryV2.blocksAutoQuoted,
+        quantityReconciled: qtyOk,
+        priceBasisKnown: basisOk,
+        packEconomicsPassed: qtyOk && packOk && basisOk,
       });
 
-      // Provisional unit sell using 25% — adjusted after aggregate markup
+      integrityLines.push({
+        lineNumber: line.lineNumber,
+        material: true,
+        reconciliation: recon,
+        priceBasisKnown: basisOk,
+        packKnownWhereRelevant: packOk,
+        unitMismatch: Boolean(recon?.flags.includes("UNIT_MISMATCH")),
+        specSelectable: mayAutoSelect(matchVerdict),
+      });
+
       const provisionalMarkup = 25;
       const lineSell = priceKnown
         ? calculatePricing({
@@ -1103,8 +1345,19 @@ export async function processClaimedRfq(
         evidenceLevel: evidenceLevel ?? "AI_ESTIMATE",
         matchVerdict,
         candidateId: selectedId,
+        reconciliation: recon,
       });
     }
+
+    artifacts.quantityReconciliations = reconciliations.map((r) => ({
+      tenderQuantity: r.tenderQuantity,
+      tenderUnit: r.tenderUnit,
+      packsRequired: r.packsRequired,
+      procurementCost: r.procurementCost,
+      firm: r.firm,
+      humanReadable: r.humanReadable,
+      flags: r.flags,
+    }));
 
     artifacts.matching = matchArtifacts;
     artifacts.selection = selectionArtifacts;
@@ -1123,24 +1376,35 @@ export async function processClaimedRfq(
 
     const deliveryForLanded = anyDeliveryKnown ? deliveryTotal : 0;
 
-    // Unknown delivery: explicit risk allowance for LOW materiality only — never raise markup
-    let deliveryAllowanceTotal = 0;
-    const materialDeliveryUnknown = guardrailLines.some(
-      (l) => l.deliveryMaterialUnknown,
-    );
-    if (!anyDeliveryKnown && totalProductCost > 0 && !materialDeliveryUnknown) {
-      const allowance = deliveryRiskAllowance(totalProductCost, {
-        type: "UNKNOWN_DELIVERY",
-        amount: null,
-        threshold: null,
-        destinationAssumption: null,
-        source: null,
-        known: false,
-        notes: [],
+    const materialDeliveryUnknown =
+      deliveryV2Blocks ||
+      guardrailLines.some((l) => l.deliveryMaterialUnknown);
+
+    // Aggregate delivery materiality on total product cost when no known delivery
+    if (!anyDeliveryKnown && totalProductCost > 0) {
+      deliveryV2Summary = classifyDeliveryV2({
+        delivery: {
+          type: "UNKNOWN_DELIVERY",
+          amount: null,
+          threshold: null,
+          destinationAssumption: null,
+          source: null,
+          known: false,
+          notes: [],
+        },
+        productCost: totalProductCost,
       });
-      if (allowance.apply) {
-        deliveryAllowanceTotal = allowance.amount;
-        reasons.push(allowance.reason);
+      if (
+        deliveryV2Summary.class === "UNKNOWN_IMMATERIAL" &&
+        deliveryAllowanceTotal === 0
+      ) {
+        deliveryAllowanceTotal = deliveryV2Summary.allowance;
+        reasons.push(deliveryV2Summary.reason);
+      } else if (deliveryV2Summary.blocksAutoQuoted) {
+        deliveryV2Blocks = true;
+        reasons.push(
+          `MATERIAL unknown delivery (${deliveryV2Summary.class}) — not buried in markup`,
+        );
       }
     } else if (materialDeliveryUnknown) {
       reasons.push(
@@ -1150,7 +1414,7 @@ export async function processClaimedRfq(
 
     const risk = buildRiskAllowances({
       deliveryAllowance: deliveryAllowanceTotal,
-      deliveryReason: "Low-materiality unknown delivery allowance (policy)",
+      deliveryReason: "Delivery materiality V2 allowance (policy)",
     });
     artifacts.riskAllowance = risk;
     if (risk.total > 0) {
@@ -1177,7 +1441,6 @@ export async function processClaimedRfq(
 
     const markup = selectMarkupPolicy({
       highConfidence,
-      // deliveryUnknown intentionally ignored by policy V2
       deliveryUnknown: !anyDeliveryKnown,
       simpleTransaction: !packAmbiguity,
       operationalComplexity: false,
@@ -1193,6 +1456,93 @@ export async function processClaimedRfq(
     });
     const landedCost = commercial.landedCost;
 
+    // Cost waterfall (exact reconciliation)
+    const waterfallLines = pricedLines
+      .filter((pl) => !pl.unresolved && pl.reconciliation?.firm)
+      .map((pl) =>
+        buildLineWaterfall({
+          lineNumber: pl.lineNumber,
+          observedSupplierPrice: pl.reconciliation?.observedSupplierPrice ?? null,
+          supplierSellingUnit:
+            pl.reconciliation?.supplierSellingUnit ?? "UNKNOWN",
+          packSize: pl.reconciliation?.supplierPackSize ?? null,
+          packsRequired: pl.reconciliation?.packsRequired ?? null,
+          unitsPurchased: pl.reconciliation?.unitsPurchased ?? null,
+          surplusUnits: pl.reconciliation?.surplusUnits ?? null,
+          normalizedProductCost: pl.productCost,
+          markupPercent: markup.markupPercent,
+        }),
+      );
+    const waterfall = buildRfqWaterfall(waterfallLines, markup.markupPercent, {
+      delivery: deliveryForLanded,
+      riskAllowances: risk.total,
+      otherDirectCosts: logisticsFromPrior,
+    });
+    artifacts.costWaterfall = waterfall;
+
+    // Historical variance (comparator, not truth)
+    const historicalProduct = (() => {
+      const priorLanded = prior ? toNumber(Number(prior.landedCost)) : null;
+      if (priorLanded && priorLanded > 0) return priorLanded;
+      return null;
+    })();
+    // Prefer sum of captured public-ref line costs when present on this RFQ
+    const capturedQuoteProduct = rfq.quotes
+      ?.flatMap((q: { lineItems: Array<{ unitCost: unknown; quantity: unknown; description: string | null }> }) =>
+        q.lineItems,
+      )
+      .filter(
+        (li: { description: string | null }) =>
+          li.description && !/logistics|delivery/i.test(li.description),
+      )
+      .reduce(
+        (s: number, li: { unitCost: unknown; quantity: unknown }) =>
+          s +
+          toNumber(Number(li.unitCost ?? 0)) * toNumber(Number(li.quantity ?? 0)),
+        0,
+      );
+    const oldComparator =
+      capturedQuoteProduct && capturedQuoteProduct > 0
+        ? capturedQuoteProduct
+        : historicalProduct;
+
+    // Extreme variance is unexplained until Founder/forensic review assigns a code.
+    // Pack hypotheses are recorded as notes, not auto-accepted explanations.
+    const variance = classifyPriceVariance({
+      oldCost: oldComparator,
+      newCost: totalProductCost,
+      explanationCode: null,
+      explanationText:
+        oldComparator != null
+          ? [
+              `Historical comparator R${oldComparator} vs live reconciled R${totalProductCost}`,
+              packAmbiguity
+                ? "Hypothesis: UNIT_OF_MEASURE_CORRECTION / pack ambiguity in live or historical"
+                : null,
+              reconciliations.some((r) => (r.supplierPackSize ?? 1) > 1)
+                ? "Hypothesis: DIFFERENT_PACK_QUANTITY"
+                : null,
+            ]
+              .filter(Boolean)
+              .join("; ")
+          : null,
+    });
+    if (
+      variance.band === "EXTREME_VARIANCE" ||
+      variance.band === "HIGH_VARIANCE"
+    ) {
+      await writeAuditEvent(
+        {
+          action: "PRICE_VARIANCE_DETECTED",
+          entityType: "Rfq",
+          entityId: rfq.id,
+          metadata: variance,
+        },
+        prisma,
+      );
+    }
+    artifacts.priceVariance = variance;
+
     // Recompute line sells with selected markup
     for (const pl of pricedLines) {
       if (pl.unresolved) continue;
@@ -1206,6 +1556,50 @@ export async function processClaimedRfq(
         pl.quantity > 0 ? priced.sellingPriceExVat / pl.quantity : 0;
     }
 
+    const integrity = evaluateCommercialIntegrity({
+      lines: integrityLines,
+      variance,
+      delivery: deliveryV2Summary,
+      waterfall,
+      vatAcceptable,
+    });
+    artifacts.commercialIntegrity = integrity;
+    await writeAuditEvent(
+      {
+        action: integrity.passed
+          ? "COMMERCIAL_INTEGRITY_PASSED"
+          : "COMMERCIAL_INTEGRITY_FAILED",
+        entityType: "Rfq",
+        entityId: rfq.id,
+        metadata: integrity,
+      },
+      prisma,
+    );
+
+    const qtyRate =
+      reconciliations.length > 0
+        ? reconciliations.filter((r) => r.firm).length / reconciliations.length
+        : 0;
+    const packRate =
+      reconciliations.length > 0
+        ? reconciliations.filter((r) =>
+            isFirmPackEvidence(r.packExtraction),
+          ).length / reconciliations.length
+        : 0;
+    const basisRate =
+      reconciliations.length > 0
+        ? reconciliations.filter((r) =>
+            isFirmPriceBasis(r.supplierPriceBasis),
+          ).length / reconciliations.length
+        : 0;
+    artifacts.integrityMetrics = {
+      QUANTITY_RECONCILIATION_RATE: qtyRate,
+      PACK_SIZE_RESOLUTION_RATE: packRate,
+      PRICE_BASIS_RESOLUTION_RATE: basisRate,
+      EXTREME_VARIANCE_RATE: variance.band === "EXTREME_VARIANCE" ? 1 : 0,
+      COMMERCIAL_INTEGRITY_PASS_RATE: integrity.passed ? 1 : 0,
+    };
+
     await writeAuditEvent(
       {
         action: "PRICING_EVIDENCE_CAPTURED",
@@ -1213,6 +1607,7 @@ export async function processClaimedRfq(
         entityId: rfq.id,
         metadata: {
           evidenceLevels: pricedLines.map((p) => p.evidenceLevel),
+          integrityMetrics: artifacts.integrityMetrics,
         },
       },
       prisma,
@@ -1228,6 +1623,7 @@ export async function processClaimedRfq(
           riskAllowance: risk.total,
           logistics: logisticsFromPrior,
           landedCost,
+          waterfall,
         },
       },
       prisma,
@@ -1249,7 +1645,19 @@ export async function processClaimedRfq(
 
     artifacts.pricing = {
       ...commercial,
-      lines: pricedLines,
+      lines: pricedLines.map((p) => ({
+        ...p,
+        reconciliation: p.reconciliation
+          ? {
+              humanReadable: p.reconciliation.humanReadable,
+              packsRequired: p.reconciliation.packsRequired,
+              procurementCost: p.reconciliation.procurementCost,
+              effectiveTenderUnitCost: p.reconciliation.effectiveTenderUnitCost,
+              firm: p.reconciliation.firm,
+              flags: p.reconciliation.flags,
+            }
+          : null,
+      })),
     };
 
     // —— QUOTATION ——
@@ -1368,6 +1776,10 @@ export async function processClaimedRfq(
       confidence: confidenceMerged,
       classificationConfident: classification.confidence >= 0.55,
       boqComplete: normalized.length > 0,
+      commercialIntegrityPassed: integrity.passed,
+      commercialIntegrityFailures: integrity.failures,
+      livePricingCredible: !evidenceWeak && qtyRate >= 0.5,
+      unexplainedExtremeVariance: variance.blocksAutoQuoted,
     });
     artifacts.outcome = guardrail;
     artifacts.guardrails = guardrail;

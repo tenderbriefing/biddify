@@ -41,6 +41,29 @@ export function generateProductSearchQueries(
   const category = attrs.categoryHint?.trim() || inferCategory(core);
   const out: GeneratedSearchQuery[] = [];
 
+  const wantsPackLanguage =
+    !/laptop|notebook|computer|monitor|desktop/i.test(core) &&
+    (attrs.unit == null ||
+      !["EA", "EACH", "UNIT"].includes(attrs.unit.toUpperCase()) ||
+      /battery|pack|box|carton|ream|bottle|roll/i.test(core));
+
+  // Short catalogue-friendly query first (retail APIs prefer concise terms)
+  if (brand && category) {
+    out.push({
+      query: compact([brand, category].join(" ")),
+      reason: "Short brand+category query for catalogue APIs",
+      lineNumber: attrs.lineNumber,
+      timestamp: now,
+    });
+  } else if (category) {
+    out.push({
+      query: compact(category),
+      reason: "Short category query for catalogue APIs",
+      lineNumber: attrs.lineNumber,
+      timestamp: now,
+    });
+  }
+
   const primaryParts = [brand, model, core, ...sizeBits.slice(0, 2), SA_CONTEXT, "price"]
     .filter(Boolean)
     .join(" ");
@@ -52,14 +75,16 @@ export function generateProductSearchQueries(
   });
 
   if (brand) {
-    out.push({
-      query: compact(
-        [brand, ...sizeBits, category || core, "pack", SA_CONTEXT].join(" "),
-      ),
-      reason: "Brand + pack sizing for procurement units",
-      lineNumber: attrs.lineNumber,
-      timestamp: now,
-    });
+    if (wantsPackLanguage) {
+      out.push({
+        query: compact(
+          [brand, ...sizeBits, category || core, "pack", SA_CONTEXT].join(" "),
+        ),
+        reason: "Brand + pack sizing for procurement units",
+        lineNumber: attrs.lineNumber,
+        timestamp: now,
+      });
+    }
     out.push({
       query: compact(
         [brand, core, "supplier OR wholesaler OR distributor", SA_CONTEXT].join(
@@ -112,10 +137,13 @@ function cleanDescription(text: string): string {
 function inferCategory(text: string): string {
   const t = text.toLowerCase();
   if (/battery|duracell|energizer|aaa|aa\b/.test(t)) return "alkaline battery";
-  if (/laptop|notebook/.test(t)) return "laptop computer";
+  if (/laptop|notebook/.test(t)) return "laptop";
   if (/dishwash|detergent/.test(t)) return "dishwashing liquid";
-  if (/towel|paper/.test(t)) return "paper towel";
+  if (/towel|paper/.test(t) && !/copy\s*paper|a4/.test(t)) return "paper towel";
   if (/cotton\s*wool/.test(t)) return "cotton wool";
+  if (/copy\s*paper|a4.*paper|ream/.test(t)) return "A4 copy paper";
+  if (/ballpoint|pen\b/.test(t)) return "ballpoint pens";
+  if (/lever\s*arch|file\b/.test(t)) return "lever arch file";
   if (/vaccine/.test(t)) return "vaccine";
   return "";
 }

@@ -277,6 +277,45 @@ export default async function AutonomousOpsDashboardPage() {
           return n ? total / n : null;
         })();
 
+  const integrityAgg = {
+    qty: 0,
+    pack: 0,
+    basis: 0,
+    extreme: 0,
+    pass: 0,
+    n: 0,
+  };
+  for (const r of completedRuns) {
+    if (!r.autonomousRunJson) continue;
+    try {
+      const run = JSON.parse(r.autonomousRunJson) as {
+        artifacts?: {
+          integrityMetrics?: {
+            QUANTITY_RECONCILIATION_RATE?: number;
+            PACK_SIZE_RESOLUTION_RATE?: number;
+            PRICE_BASIS_RESOLUTION_RATE?: number;
+            EXTREME_VARIANCE_RATE?: number;
+            COMMERCIAL_INTEGRITY_PASS_RATE?: number;
+          };
+        };
+      };
+      const m = run.artifacts?.integrityMetrics;
+      if (!m) continue;
+      integrityAgg.n += 1;
+      integrityAgg.qty += m.QUANTITY_RECONCILIATION_RATE ?? 0;
+      integrityAgg.pack += m.PACK_SIZE_RESOLUTION_RATE ?? 0;
+      integrityAgg.basis += m.PRICE_BASIS_RESOLUTION_RATE ?? 0;
+      integrityAgg.extreme += m.EXTREME_VARIANCE_RATE ?? 0;
+      integrityAgg.pass += m.COMMERCIAL_INTEGRITY_PASS_RATE ?? 0;
+    } catch {
+      /* ignore */
+    }
+  }
+  const integrityPct = (v: number) =>
+    integrityAgg.n
+      ? `${((v / integrityAgg.n) * 100).toFixed(0)}%`
+      : "—";
+
   return (
     <div className="space-y-6">
       <div>
@@ -285,8 +324,9 @@ export default async function AutonomousOpsDashboardPage() {
         </h1>
         <p className="mt-1 text-sm text-[var(--fg-muted)]">
           Prep autonomy {prepOn ? "ON" : "OFF"} · Live web research ON ·
-          Submission autonomy {submitOff ? "OFF" : "ON (blocked)"} · Manual
-          supplier quotes remain fallback
+          Commercial integrity gate ON · Submission autonomy{" "}
+          {submitOff ? "OFF" : "ON (blocked)"} · Manual supplier quotes remain
+          fallback
         </p>
       </div>
 
@@ -368,6 +408,26 @@ export default async function AutonomousOpsDashboardPage() {
         <Metric label="AUTO_QUOTED %" value={pct(autoQuoted)} />
         <Metric label="REVIEW_REQUIRED %" value={pct(reviewRequired)} />
         <Metric label="UNPRICEABLE %" value={pct(unpriceable)} />
+        <Metric
+          label="QUANTITY_RECONCILIATION_RATE"
+          value={integrityPct(integrityAgg.qty)}
+        />
+        <Metric
+          label="PACK_SIZE_RESOLUTION_RATE"
+          value={integrityPct(integrityAgg.pack)}
+        />
+        <Metric
+          label="PRICE_BASIS_RESOLUTION_RATE"
+          value={integrityPct(integrityAgg.basis)}
+        />
+        <Metric
+          label="EXTREME_VARIANCE_RATE"
+          value={integrityPct(integrityAgg.extreme)}
+        />
+        <Metric
+          label="COMMERCIAL_INTEGRITY_PASS_RATE"
+          value={integrityPct(integrityAgg.pass)}
+        />
         <Metric
           label="Top research failures"
           value={

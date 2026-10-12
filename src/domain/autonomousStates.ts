@@ -49,7 +49,8 @@ export const TERMINAL_AUTONOMOUS_STATES: ReadonlySet<AutonomousProcessingState> 
     "COMPLETED",
   ]);
 
-export const WORKER_VERSION = "autonomous-rfq-engine-v1.1-live-web";
+export const WORKER_VERSION =
+  "autonomous-rfq-engine-v1.2-commercial-integrity";
 
 /** Transient failures may retry; structural outcomes must not. */
 export const MAX_TRANSIENT_RETRIES = 2;

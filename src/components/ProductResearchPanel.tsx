@@ -146,11 +146,32 @@ export function ProductResearchPanel({
                 {pack && (
                   <div className="mt-3 text-sm">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--fg-muted)]">
-                      Pack calculation
+                      Quantity reconciliation
                     </div>
-                    <pre className="mt-1 whitespace-pre-wrap text-xs">
-                      {pack.calculation ?? JSON.stringify(pack, null, 2)}
+                    <pre className="mt-1 whitespace-pre-wrap text-xs leading-relaxed">
+                      {pack.humanReadable ??
+                        pack.calculation ??
+                        JSON.stringify(pack, null, 2)}
                     </pre>
+                    {pack.firm === false && (
+                      <p className="mt-1 text-xs text-amber-800">
+                        Not firm autonomous evidence
+                        {Array.isArray(pack.flags) && pack.flags.length
+                          ? ` (${pack.flags.join(", ")})`
+                          : ""}
+                      </p>
+                    )}
+                    {pack.procurementCost != null && (
+                      <p className="mt-1 text-xs">
+                        Procurement cost: {formatZar(Number(pack.procurementCost))}
+                        {pack.effectiveTenderUnitCost != null
+                          ? ` · Effective unit: ${formatZar(Number(pack.effectiveTenderUnitCost))}`
+                          : ""}
+                        {pack.surplusUnits != null && pack.surplusUnits > 0
+                          ? ` · Surplus: ${pack.surplusUnits}`
+                          : ""}
+                      </p>
+                    )}
                   </div>
                 )}
                 {delivery && (
